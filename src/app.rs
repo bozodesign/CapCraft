@@ -192,17 +192,17 @@ pub const PREROLL_SECONDS: f64 = 1.5;
 /// whole frames (compareAlignTimeByFps 0x180f68bc0: each time is rounded to the nearest frame,
 /// 0x180f69290 / 0x180f693e0), so a pointer in the same frame as the middle still goes in before
 /// that clip. Past the last clip it goes at the end.
-pub fn main_slot(clips: &[Clip], t: f64, skip: Option<u64>, fps: f64) -> usize {
+pub fn main_slot(clips: &[Clip], t: f64, skip: &[u64], fps: f64) -> usize {
     let frame = |x: f64| (x * fps.max(1.0)).round();
     let ft = frame(t);
     let mut at = 0.0;
-    for (n, c) in clips.iter().filter(|c| Some(c.id) != skip).enumerate() {
+    for (n, c) in clips.iter().filter(|c| !skip.contains(&c.id)).enumerate() {
         if ft <= frame(at + c.duration / 2.0) {
             return n;
         }
         at += c.duration;
     }
-    clips.iter().filter(|c| Some(c.id) != skip).count()
+    clips.iter().filter(|c| !skip.contains(&c.id)).count()
 }
 
 #[cfg(test)]
@@ -214,16 +214,19 @@ mod slot_tests {
         let clips = vec![Clip::new(1, None, 0.0, 2.0), Clip::new(2, None, 2.0, 2.0), Clip::new(3, None, 4.0, 2.0)];
         // the first clip taken out, the others close up to 0-2 and 2-4: 2.5 s is past the
         // middle of the second clip, so it goes in after it
-        assert_eq!(main_slot(&clips, 2.5, Some(1), 30.0), 1);
-        assert_eq!(main_slot(&clips, 0.5, Some(1), 30.0), 0);
-        assert_eq!(main_slot(&clips, 9.0, Some(1), 30.0), 2);
+        assert_eq!(main_slot(&clips, 2.5, &[1], 30.0), 1);
+        assert_eq!(main_slot(&clips, 0.5, &[1], 30.0), 0);
+        assert_eq!(main_slot(&clips, 9.0, &[1], 30.0), 2);
         // nothing taken out: the track as it is
-        assert_eq!(main_slot(&clips, 2.5, None, 30.0), 1);
-        assert_eq!(main_slot(&clips, 3.5, None, 30.0), 2);
+        assert_eq!(main_slot(&clips, 2.5, &[], 30.0), 1);
+        assert_eq!(main_slot(&clips, 3.5, &[], 30.0), 2);
         // in the same frame as a middle (3.0 s) still goes in before that clip, as in the original;
         // one frame past it goes in after
-        assert_eq!(main_slot(&clips, 3.01, None, 30.0), 1);
-        assert_eq!(main_slot(&clips, 3.0 + 1.0 / 30.0, None, 30.0), 2);
+        assert_eq!(main_slot(&clips, 3.01, &[], 30.0), 1);
+        assert_eq!(main_slot(&clips, 3.0 + 1.0 / 30.0, &[], 30.0), 2);
+        // two picked clips taken out together: only the third is left, 0-2
+        assert_eq!(main_slot(&clips, 1.5, &[1, 2], 30.0), 1);
+        assert_eq!(main_slot(&clips, 0.5, &[1, 2], 30.0), 0);
     }
 }
 
@@ -775,6 +778,13 @@ impl App {
     pub fn main_insert_index(&self, t: f64, skip: Option<u64>) -> usize {
         // counted on the main track as it closes up without the clip being moved, so the place
         // matches the gap shown while dragging: past the middle of a clip goes in after it
+        let mi = self.project.main_index();
+        main_slot(&self.project.tracks[mi].clips, t, skip.as_slice(), self.project.fps)
+    }
+
+    /// Insert index on the main track for a time, with several clips taken out (a block of
+    /// picked clips being moved).
+    pub fn main_insert_index_skip(&self, t: f64, skip: &[u64]) -> usize {
         let mi = self.project.main_index();
         main_slot(&self.project.tracks[mi].clips, t, skip, self.project.fps)
     }
@@ -2202,14 +2212,14 @@ impl App {
             ui.label(egui::RichText::new(format!("/ {}", timecode(self.project.duration(), self.project.fps))).color(MUTED).monospace());
             let w = ui.available_width();
             ui.add_space((w / 2.0 - 150.0).max(0.0));
-            if ui.add(egui::Button::new("⏮").frame(false)).on_hover_text("Start").clicked() {
+            if transport_button(ui, false).on_hover_text("Start").clicked() {
                 self.seek(0.0);
             }
             let icon = if self.playing { "⏸" } else { "▶" };
             if ui.add(egui::Button::new(egui::RichText::new(icon).size(20.0)).frame(false)).on_hover_text("Play / pause (Space)").clicked() {
                 self.toggle_play();
             }
-            if ui.add(egui::Button::new("⏭").frame(false)).on_hover_text("End").clicked() {
+            if transport_button(ui, true).on_hover_text("End").clicked() {
                 let d = self.project.duration();
                 self.seek(d);
             }
@@ -2382,6 +2392,23 @@ impl App {
             self.lib_drag = None;
         }
     }
+}
+
+/// The Start and End buttons, drawn rather than taken from a font so both are the same size: a
+/// bar and a triangle pointing at it (End is Start mirrored).
+const TRANSPORT_BOX: f32 = 24.0;
+const TRANSPORT_ICON: f32 = 12.0;
+fn transport_button(ui: &mut egui::Ui, end: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(TRANSPORT_BOX), egui::Sense::click());
+    let col = if resp.hovered() { Color32::WHITE } else { TEXT };
+    let c = rect.center();
+    let h = TRANSPORT_ICON / 2.0;
+    let bar_w = 2.0;
+    // (x of the bar, x of the triangle's point, x of its back)
+    let (bar, tip, back) = if end { (c.x + h - bar_w, c.x + h - bar_w, c.x - h) } else { (c.x - h, c.x - h + bar_w, c.x + h) };
+    ui.painter().rect_filled(Rect::from_min_size(Pos2::new(bar, c.y - h), Vec2::new(bar_w, TRANSPORT_ICON)), 0.5, col);
+    ui.painter().add(egui::Shape::convex_polygon(vec![Pos2::new(tip, c.y), Pos2::new(back, c.y - h), Pos2::new(back, c.y + h)], col, Stroke::NONE));
+    resp
 }
 
 /// A clip's sound, then its thumbnails. The sound comes first and on its own thread, so Play

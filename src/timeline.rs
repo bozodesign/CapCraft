@@ -179,13 +179,13 @@ fn ratio_from_zoom(z: f32, start: usize, low: f32) -> f64 {
 }
 const RULER_H: f32 = 26.0;
 
-/// The original's preview axis (MainTimeLineAxis `timelinePreviewAxis` in the timeline QML): a
-/// line that follows the mouse across the ruler and the tracks, 2 px wide, dashed 1 on 3 off
-/// (in line widths), in LVColor.State_Warning_Default (FusionUI 0x180020540: #D4A500). Over the
-/// ruler, the frame under it is marked in LVColor.White1A (0x180024be0: #1FFAFAFA).
-const AXIS_W: f32 = 2.0;
-const AXIS_DASH: [f32; 2] = [1.0, 3.0];
-const AXIS_COLOR: Color32 = Color32::from_rgb(0xD4, 0xA5, 0x00);
+/// The preview axis: a line that follows the mouse across the ruler and the tracks. The
+/// original's (MainTimeLineAxis `timelinePreviewAxis` in the timeline QML) is 2 px, dashed 1 on
+/// 3 off, in LVColor.State_Warning_Default (FusionUI 0x180020540: #D4A500); the person asked for
+/// a plain solid hairline in red instead (CapCraft's red, `ACCENT`). Over the ruler, the frame
+/// under it is marked in LVColor.White1A (0x180024be0: #1FFAFAFA), as in the original.
+const AXIS_W: f32 = 1.0;
+const AXIS_COLOR: Color32 = ACCENT;
 // #1FFAFAFA (alpha 0x1F over 0xFA) stored premultiplied: 0xFA * 0x1F / 255 = 30
 const AXIS_MASK: Color32 = Color32::from_rgba_premultiplied(30, 30, 30, 0x1F);
 
@@ -257,8 +257,9 @@ const MOVE_FLOAT_H: f32 = 0.65;
 
 /// Where clips are drawn while one is being moved, before it is let go.
 struct MovePreview {
-    /// The clip drawn following the pointer instead of in its track.
-    floating: Option<u64>,
+    /// The clips drawn following the pointer instead of in their track: the grabbed one, or the
+    /// picked main-track clips moving as one block (in their order).
+    floating: Vec<u64>,
     /// Where the other clips would start if it were let go now.
     starts: Vec<(u64, f64)>,
     /// The gap opened for it where it will land: (track, start, length).
@@ -453,23 +454,22 @@ impl App {
         let above = target.is_none() && rows.first().map(|r| p.y < r.rect.top() - 3.0).unwrap_or(false);
         let mut starts = vec![];
         let mut slot = None;
-        // the main track packed from the start, optionally with the moved clip's gap at `ins`
-        let pack_main = |ins: Option<usize>, starts: &mut Vec<(u64, f64)>, slot: &mut Option<(usize, f64, f64)>| {
-            let mut clips: Vec<Clip> = self.project.tracks[mi].clips.iter().filter(|x| x.id != d.clip_id).cloned().collect();
-            let ins = ins.map(|i| i.min(clips.len()));
-            if let Some(i) = ins {
-                let mut g = c.clone();
-                g.transition = None;
-                clips.insert(i, g);
-            }
+        // the picked main-track clips move together, as one block
+        let block = self.main_block(d);
+        let block_len: f64 = block.iter().filter_map(|&id| self.project.clip(id)).map(|x| x.duration).sum();
+        // the main track packed from the start without `remove`, with a gap `ins` = (place, length)
+        let pack_main = |remove: &[u64], ins: Option<(usize, f64)>, starts: &mut Vec<(u64, f64)>, slot: &mut Option<(usize, f64, f64)>| {
+            let clips: Vec<Clip> = self.project.tracks[mi].clips.iter().filter(|x| !remove.contains(&x.id)).cloned().collect();
             let mut t = 0.0;
-            for i in 0..clips.len() {
-                if Some(i) == ins {
-                    *slot = Some((mi, t, clips[i].duration));
-                } else {
-                    starts.push((clips[i].id, t));
+            for i in 0..=clips.len() {
+                if let Some((_, len)) = ins.filter(|&(at, _)| at.min(clips.len()) == i) {
+                    *slot = Some((mi, t, len));
+                    t += len;
                 }
-                t += clips[i].duration - Project::transition_len(&clips, i);
+                if i < clips.len() {
+                    starts.push((clips[i].id, t));
+                    t += clips[i].duration - Project::transition_len(&clips, i);
+                }
             }
         };
         // another track with the clip put in at the join, the clips after it moved right
@@ -485,15 +485,19 @@ impl App {
             }
         };
         let t = view.t(p.x);
+        let one = [d.clip_id];
+        let mut floating = vec![d.clip_id];
         match (kind, target.map(|r| (r.ti, r.kind))) {
-            (TrackKind::Main, Some((_, TrackKind::Main))) => pack_main(Some(self.main_insert_index(t, Some(d.clip_id))), &mut starts, &mut slot),
             (TrackKind::Main, Some((tti, TrackKind::Overlay))) if visual => {
-                pack_main(None, &mut starts, &mut slot);
+                pack_main(&one, None, &mut starts, &mut slot);
                 put_in(tti, &mut starts, &mut slot);
             }
-            (TrackKind::Main, _) if above && visual => pack_main(None, &mut starts, &mut slot),
-            (TrackKind::Main, _) => pack_main(Some(self.main_insert_index(t, Some(d.clip_id))), &mut starts, &mut slot),
-            (TrackKind::Overlay, Some((_, TrackKind::Main))) if visual => pack_main(Some(self.main_insert_index(t, None)), &mut starts, &mut slot),
+            (TrackKind::Main, None) if above && visual => pack_main(&one, None, &mut starts, &mut slot),
+            (TrackKind::Main, _) => {
+                pack_main(&block, Some((self.main_insert_index_skip(t, &block), block_len)), &mut starts, &mut slot);
+                floating = block.clone();
+            }
+            (TrackKind::Overlay, Some((_, TrackKind::Main))) if visual => pack_main(&[], Some((self.main_insert_index(t, None), c.duration)), &mut starts, &mut slot),
             (k, Some((tti, tk))) if tk == k => put_in(tti, &mut starts, &mut slot),
             (k, None) if above && (k == TrackKind::Overlay || k == TrackKind::Text) => {}
             _ => {
@@ -502,7 +506,17 @@ impl App {
                 }
             }
         }
-        Some(MovePreview { floating: Some(d.clip_id), starts, slot })
+        Some(MovePreview { floating, starts, slot })
+    }
+
+    /// The main-track clips a drag of a main-track clip moves: the grabbed one and the other
+    /// picked ones on the main track, in the track's order. Empty for other drags.
+    fn main_block(&self, d: &TlDrag) -> Vec<u64> {
+        if !d.main {
+            return vec![];
+        }
+        let mi = self.project.main_index();
+        self.project.tracks[mi].clips.iter().map(|c| c.id).filter(|&id| id == d.clip_id || d.group.iter().any(|g| g.0 == id)).collect()
     }
 
     /// While the start of a main-track clip is being trimmed: the clip's place on the track and
@@ -871,20 +885,20 @@ impl App {
                         }
                         if !locked(self, id) {
                             let mut d = mk(DragKind::Move, id, self);
-                            if !d.main {
-                                // the others ride along by the same time (main-track clips keep
-                                // their order and stay where they are)
-                                d.group = self
-                                    .group()
-                                    .into_iter()
-                                    .filter(|&o| o != id)
-                                    .filter_map(|o| {
-                                        let (ti, ci) = self.project.find_clip(o)?;
-                                        let t = &self.project.tracks[ti];
-                                        (t.kind != TrackKind::Main && !t.locked).then(|| (o, t.clips[ci].start))
-                                    })
-                                    .collect();
-                            }
+                            // the other picked clips come along: on other tracks by the same
+                            // time; grabbing a main-track clip also takes the picked main-track
+                            // clips with it as one block, in their order
+                            let from_main = d.main;
+                            d.group = self
+                                .group()
+                                .into_iter()
+                                .filter(|&o| o != id)
+                                .filter_map(|o| {
+                                    let (ti, ci) = self.project.find_clip(o)?;
+                                    let t = &self.project.tracks[ti];
+                                    (!t.locked && (from_main || t.kind != TrackKind::Main)).then(|| (o, t.clips[ci].start))
+                                })
+                                .collect();
                             self.tl_drag = Some(d);
                         }
                     }
@@ -1028,31 +1042,16 @@ impl App {
             }
         });
 
-        // cursor
+        // cursor: the normal pointer everywhere on the timeline (the person's wish), except on a
+        // clip's left or right edge and while trimming it
         if self.tl_drag.is_none() {
-            match hit_now {
-                Some(Hit::Edge(..)) | Some(Hit::Fade(..)) => ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal),
-                Some(Hit::Clip(_)) => ui.ctx().set_cursor_icon(CursorIcon::Grab),
-                Some(Hit::Junction(_)) | Some(Hit::VolPoint(..)) => ui.ctx().set_cursor_icon(CursorIcon::PointingHand),
-                Some(Hit::VolLine(_)) => ui.ctx().set_cursor_icon(CursorIcon::ResizeVertical),
-                Some(Hit::Ruler) => {
-                    let on_head = ptr.map(|p| (p.x - view.x(self.playhead)).abs() <= PLAYHEAD_GRAB).unwrap_or(false);
-                    ui.ctx().set_cursor_icon(if on_head { CursorIcon::ResizeHorizontal } else { CursorIcon::Grab });
-                }
-                _ => {}
+            if let Some(Hit::Edge(..)) = hit_now {
+                ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
             }
         } else if let Some(d) = &self.tl_drag {
-            ui.ctx().set_cursor_icon(match d.kind {
-                DragKind::TrimL | DragKind::TrimR => CursorIcon::ResizeHorizontal,
-                DragKind::Move => CursorIcon::Grabbing,
-                DragKind::Playhead => CursorIcon::Default,
-                DragKind::VolPoint(_) => CursorIcon::Grabbing,
-                DragKind::VolLine => CursorIcon::ResizeVertical,
-                DragKind::Fade(_) => CursorIcon::ResizeHorizontal,
-                DragKind::Box => CursorIcon::Crosshair,
-                DragKind::Pan => CursorIcon::Grabbing,
-                DragKind::Zoom => CursorIcon::ZoomIn,
-            });
+            if matches!(d.kind, DragKind::TrimL | DragKind::TrimR) {
+                ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+            }
         }
 
         // ---- drops from the library
@@ -1133,7 +1132,7 @@ impl App {
         for row in &rows {
             let tr = &self.project.tracks[row.ti];
             for (ci, c) in tr.clips.iter().enumerate() {
-                if mv.as_ref().map(|m| m.floating == Some(c.id)).unwrap_or(false) {
+                if mv.as_ref().map(|m| m.floating.contains(&c.id)).unwrap_or(false) {
                     continue;
                 }
                 let shifted;
@@ -1185,7 +1184,6 @@ impl App {
             }
         }
 
-        // ghost of a main-track clip being moved, and where it would land
         // a clip being moved: the gap opened where it will land, and the clip itself following
         // the pointer both ways, held where it was grabbed (as in the original)
         if let (Some(d), Some(m), Some(p)) = (self.tl_drag.as_ref().filter(|d| d.kind == DragKind::Move), mv.as_ref(), ptr) {
@@ -1198,16 +1196,29 @@ impl App {
             }
             let src = self.project.find_clip(d.clip_id).map(|(ti, _)| ti);
             let c = if d.main { d.orig.clone() } else { self.project.clip(d.clip_id).cloned() };
-            if let (Some(mut c), Some(row)) = (c, src.and_then(|ti| rows.iter().find(|r| r.ti == ti).copied())) {
-                c.start = d.ghost;
+            if let (Some(grabbed), Some(row)) = (c, src.and_then(|ti| rows.iter().find(|r| r.ti == ti).copied())) {
                 let h = row.rect.height() - 2.0;
                 let fh = h * MOVE_FLOAT_H;
                 // the share of the clip's height above the pointer when it was grabbed
                 let grip = ((d.from.y - row.rect.top() - 1.0) / h.max(1.0)).clamp(0.0, 1.0);
-                let w = (c.duration as f32 * view.zoom).max(4.0);
-                let r = Rect::from_min_size(pos2(view.x(d.ghost), p.y - grip * fh), vec2(w, fh));
-                painter.rect_filled(r.translate(vec2(0.0, 3.0)), 4.0, Color32::from_black_alpha(90));
-                self.draw_clip(&painter, &c, row.kind, r, true, false, view, content);
+                let y = p.y - grip * fh;
+                // a block of picked main-track clips: side by side in their order, the grabbed
+                // one under the pointer
+                let floating: Vec<Clip> = if m.floating.len() > 1 {
+                    m.floating.iter().filter_map(|&id| if id == d.clip_id { Some(grabbed.clone()) } else { self.project.clip(id).cloned() }).collect()
+                } else {
+                    vec![grabbed.clone()]
+                };
+                let before: f64 = floating.iter().take_while(|x| x.id != d.clip_id).map(|x| x.duration).sum();
+                let mut at = d.ghost - before;
+                for mut c in floating {
+                    c.start = at;
+                    at += c.duration;
+                    let w = (c.duration as f32 * view.zoom).max(4.0);
+                    let r = Rect::from_min_size(pos2(view.x(c.start), y), vec2(w, fh));
+                    painter.rect_filled(r.translate(vec2(0.0, 3.0)), 4.0, Color32::from_black_alpha(90));
+                    self.draw_clip(&painter, &c, row.kind, r, true, false, view, content);
+                }
             }
         }
         if let Some((x, r)) = drop_line {
@@ -1269,7 +1280,7 @@ impl App {
                 let m = Rect::from_min_max(pos2(view.x(t0), ruler.top()), pos2(view.x(t0 + minor), ruler.bottom()));
                 painter.rect_filled(m, 0.0, AXIS_MASK);
             }
-            painter.add(egui::Shape::dashed_line(&[pos2(x, ruler.top()), pos2(x, content.bottom())], Stroke::new(AXIS_W, AXIS_COLOR), AXIS_DASH[0] * AXIS_W, AXIS_DASH[1] * AXIS_W));
+            painter.line_segment([pos2(x, ruler.top()), pos2(x, content.bottom())], Stroke::new(AXIS_W, AXIS_COLOR));
         }
 
         // the scroll bar
@@ -1337,11 +1348,15 @@ impl App {
                     if let Some(c) = self.project.clip_mut(id) {
                         c.start = d.ghost;
                     }
-                    let delta = d.ghost - o.start;
-                    for &(gid, gs) in &d.group {
-                        if let Some(c) = self.project.clip_mut(gid) {
-                            c.start = (gs + delta).max(0.0);
-                        }
+                }
+                // the picked clips on other tracks ride along by the same time (picked main-track
+                // clips move as a block when let go)
+                let delta = d.ghost - o.start;
+                let mi = self.project.main_index();
+                for &(gid, gs) in &d.group {
+                    let on_main = self.project.find_clip(gid).map(|(t, _)| t == mi).unwrap_or(false);
+                    if let (false, Some(c)) = (on_main, self.project.clip_mut(gid)) {
+                        c.start = (gs + delta).max(0.0);
                     }
                 }
             }
@@ -1451,11 +1466,14 @@ impl App {
                 self.new_track_with(TrackKind::Overlay, c);
             }
             (TrackKind::Main, _) => {
-                let idx = self.main_insert_index(view.t(p.x), Some(id));
-                let clips = &mut self.project.tracks[ti].clips;
-                let moved = clips.remove(ci);
-                let idx = idx.min(clips.len());
-                clips.insert(idx, moved);
+                // the grabbed clip and the picked main-track clips, in their order, go in together
+                let block = self.main_block(d);
+                let idx = self.main_insert_index_skip(view.t(p.x), &block);
+                let clips = std::mem::take(&mut self.project.tracks[ti].clips);
+                let (moved, mut rest): (Vec<Clip>, Vec<Clip>) = clips.into_iter().partition(|c| block.contains(&c.id));
+                let idx = idx.min(rest.len());
+                rest.splice(idx..idx, moved);
+                self.project.tracks[ti].clips = rest;
             }
             (TrackKind::Overlay, Some((tti, TrackKind::Main))) if visual && !target_locked => {
                 let idx = self.main_insert_index(view.t(p.x), None);
@@ -1493,6 +1511,9 @@ impl App {
         // the picked clips that moved along: any that landed on another clip find a free track
         for &(gid, _) in &d.group {
             let Some((gti, gci)) = self.project.find_clip(gid) else { continue };
+            if self.project.tracks[gti].kind == TrackKind::Main {
+                continue;
+            }
             if !fits(&self.project.tracks[gti], &self.project.tracks[gti].clips[gci]) {
                 let k = self.project.tracks[gti].kind;
                 let gc = self.project.tracks[gti].clips.remove(gci);
