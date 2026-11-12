@@ -313,17 +313,19 @@ fn snap1(t: f64, points: &[f64], thr: f64) -> (f64, Option<f64>) {
     }
 }
 
-/// Where the volume line of a clip lives, if it has one: every clip with sound on a sound
-/// track, and the selected clip elsewhere. It sits in the clip's sound strip (under the
-/// pictures of a video, under the name of a sound clip), not over the pictures, so grabbing a
-/// clip to move it doesn't catch the line by mistake (the person's request).
-fn vol_band(p: &Project, kind: TrackKind, c: &Clip, r: Rect, selected: bool) -> Option<Rect> {
+/// Where the volume line of a clip lives: every clip with sound, always (the original's
+/// SegmentKeyFrameAudioLine is "changed to display forever" since its version 320). It fills
+/// the clip's sound strip, anchored to the bottom: under the pictures of a video (height =
+/// soundWaveItem.height), under the name of a sound clip with 2 px kept at each side
+/// (leftMargin/rightMargin 2), so grabbing a clip to move it doesn't catch the line.
+fn vol_band(p: &Project, kind: TrackKind, c: &Clip, r: Rect, _selected: bool) -> Option<Rect> {
     let m = c.media.and_then(|m| p.media(m))?;
-    if !(kind == TrackKind::Audio || m.kind == MediaKind::Audio || selected) {
-        return None;
-    }
-    sound_band(p, kind, c, r).map(|b| b.shrink2(vec2(0.0, VOL_BAND_PAD))).filter(|b| b.height() >= VOL_BAND_MIN_H)
+    let side = if m.kind == MediaKind::Audio || kind == TrackKind::Audio { VOL_SOUND_SIDE } else { 0.0 };
+    sound_band(p, kind, c, r).map(|b| b.shrink2(vec2(side, VOL_BAND_PAD))).filter(|b| b.height() >= VOL_BAND_MIN_H)
 }
+
+/// Space the volume line keeps at each side of a sound clip (QML leftMargin/rightMargin 2).
+const VOL_SOUND_SIDE: f32 = 2.0;
 
 /// Space kept above and below the volume line's band inside the sound strip (pixels).
 const VOL_BAND_PAD: f32 = 0.0;
@@ -382,10 +384,14 @@ fn fade_handles(c: &Clip, band: Rect, view: View) -> (Pos2, Pos2) {
 /// How far up the sound strip an unchanged level (0 dB) is drawn: measured from the person's
 /// picture of the original (the line's middle 6.4 px up a 15 px strip).
 const VOL_ZERO_AT: f32 = 0.43;
-/// The volume line as the original draws it (measured from the same picture): one pixel of
-/// white at about 24% over the strip (the strip's rgb 0, 77, 82 turns 60, 119, 123).
+/// The volume line as the original draws it: lineWidth 1, white, at opacity 0.3 until the
+/// mouse is over it and 1.0 then (QML SegmentKeyFrameAudioLine `opacity: mouseHoverVolumeLine
+/// ? 1.0 : 0.3`; the person's picture shows the strip's rgb 0, 77, 82 turning 60, 119, 123).
 const VOL_LINE_W: f32 = 1.0;
-const VOL_LINE: Color32 = Color32::from_rgba_premultiplied(60, 60, 60, 60);
+const VOL_LINE_OPACITY: f32 = 0.3;
+const VOL_LINE_HOVER_OPACITY: f32 = 1.0;
+/// The size of a volume point (QML pointSize 14): it is caught within half of it.
+const VOL_POINT_SIZE: f32 = 14.0;
 
 /// Share of the band's height for a level in dB: VOL_DB_MIN (and silence) at the bottom,
 /// 0 dB at VOL_ZERO_AT, +20 dB at the top, straight in dB on each side of 0 dB.
@@ -612,7 +618,7 @@ impl App {
                     if let Some(band) = vol_band(&self.project, row.kind, c, r, self.selection == Selection::Clip(c.id)) {
                         for (i, vp) in c.vol_points.iter().enumerate() {
                             let q = pos2(view.x(c.start + vp.t), vol_y(band, c.volume * vp.g));
-                            if q.distance(p) <= 6.0 {
+                            if q.distance(p) <= VOL_POINT_SIZE / 2.0 {
                                 return Hit::VolPoint(c.id, i);
                             }
                         }
@@ -1809,7 +1815,9 @@ impl App {
         if let Some(band) = vol_band(&self.project, kind, c, r, sel) {
             let line = vol_polyline(c, band, view);
             let col = Color32::from_rgb(235, 235, 240);
-            cp.add(egui::Shape::line(line, Stroke::new(VOL_LINE_W, VOL_LINE)));
+            let over = painter.ctx().pointer_hover_pos().map(|h| band.contains(h)).unwrap_or(false);
+            let a = if over { VOL_LINE_HOVER_OPACITY } else { VOL_LINE_OPACITY };
+            cp.add(egui::Shape::line(line, Stroke::new(VOL_LINE_W, Color32::WHITE.gamma_multiply(a))));
             for vp in &c.vol_points {
                 let q = pos2(view.x(c.start + vp.t), vol_y(band, c.volume * vp.g));
                 cp.circle_filled(q, 3.0, col);

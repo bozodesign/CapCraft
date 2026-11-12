@@ -37,7 +37,8 @@ pub const PITCH_CHANGE_ABOVE: f64 = 5.0;
 /// and never more than 10 (+20 dB).
 pub const VOLUME_MAX: f32 = 10.0;
 pub const VOL_DB_MAX: f32 = 20.0;
-/// Bottom of the volume line in dB; anything quieter is drawn as silent (our choice).
+/// Bottom of the volume line in dB (QML SegmentKeyFrameAudioLine `volumeDown: -60`; its
+/// `volumeUp: 20` is VOL_DB_MAX). The original shows this level as "-∞dB".
 pub const VOL_DB_MIN: f32 = -60.0;
 
 /// A level (1.0 = unchanged) in dB; silent is -infinity.
@@ -54,11 +55,11 @@ pub fn db_to_gain(db: f32) -> f32 {
     10f32.powf(db / 20.0).min(VOLUME_MAX)
 }
 
-/// "+3.5 dB", "0.0 dB" or "Silent".
+/// "+3.5 dB", "0.0 dB" or "-∞ dB" (the original's tooltip shows "-60.0" as "-∞").
 pub fn db_text(g: f32) -> String {
     let db = gain_to_db(g);
-    if db < VOL_DB_MIN {
-        "Silent".into()
+    if db <= VOL_DB_MIN + 0.05 {
+        "-∞ dB".into()
     } else {
         format!("{}{:.1} dB", if db > 0.05 { "+" } else { "" }, db)
     }
