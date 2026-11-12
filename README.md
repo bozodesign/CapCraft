@@ -65,6 +65,7 @@ no upload and no internet needed.
 
 ### Export
 - **MP4** at 480p, 720p, 1080p, 2K or 4K, with Lower, Recommended or Higher quality and a choice of frame rate.
+- **Custom bitrate**: type your own bitrate in kbps (from 1000 up to a limit for each resolution, e.g. 50 000 at 1080p), variable (VBR) or constant (CBR).
 
 ---
 

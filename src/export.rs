@@ -17,6 +17,8 @@ pub enum Quality {
     Lower,
     Recommended,
     Higher,
+    /// The person's own bitrate (`Settings::kbps`), as the original's custom bit rate.
+    Custom,
 }
 
 impl Quality {
@@ -25,6 +27,7 @@ impl Quality {
             Quality::Lower => 26,
             Quality::Recommended => 20,
             Quality::Higher => 16,
+            Quality::Custom => 20,
         }
     }
     pub fn name(self) -> &'static str {
@@ -32,8 +35,47 @@ impl Quality {
             Quality::Lower => "Lower",
             Quality::Recommended => "Recommended",
             Quality::Higher => "Higher",
+            Quality::Custom => "Custom",
         }
     }
+    pub const ALL: [Quality; 4] = [Quality::Lower, Quality::Recommended, Quality::Higher, Quality::Custom];
+}
+
+/// Lowest custom bitrate, in kbps: the original's export screen raises anything under 1000 to 1000.
+pub const CUSTOM_KBPS_MIN: u32 = 1000;
+/// A custom bitrate before the person types one (estimated).
+pub const CUSTOM_KBPS_DEFAULT: u32 = 10000;
+
+/// Highest custom bitrate for an export height, in kbps, as the original's export view model
+/// works it out (ExportVideoOptionsPanelViewModel::maximumBitrate, VECreator.dll 0x1844599d0 ->
+/// 0x184399460): 480p 18000, 720p 30000, 1080p 50000, 2K (1440) 100000, 4K 240000
+/// (160000 when a second setting is on, which CapCraft doesn't have), 8K (4320) 480000;
+/// any other height 240000.
+pub fn max_kbps(short_side: u32) -> u32 {
+    match short_side {
+        480 => 18000,
+        720 => 30000,
+        1080 => 50000,
+        1440 => 100000,
+        4320 => 480000,
+        _ => 240000,
+    }
+}
+
+/// The video encoder's rate settings: a quality level, or the custom bitrate held between
+/// 1000 kbps and the highest for the height, kept on average (variable) or all the way (constant).
+pub fn rate_args(s: &Settings) -> Vec<String> {
+    if s.quality != Quality::Custom {
+        return vec!["-crf".into(), s.quality.crf().to_string()];
+    }
+    let k = s.kbps.clamp(CUSTOM_KBPS_MIN, max_kbps(s.short_side));
+    let mut a = vec!["-b:v".to_string(), format!("{k}k")];
+    if s.constant {
+        a.extend(["-minrate".into(), format!("{k}k"), "-maxrate".into(), format!("{k}k"), "-bufsize".into(), format!("{k}k"), "-x264-params".into(), "nal-hrd=cbr".into()]);
+    } else {
+        a.extend(["-maxrate".into(), format!("{}k", k * 2), "-bufsize".into(), format!("{}k", k * 2)]);
+    }
+    a
 }
 
 pub const RESOLUTIONS: [(&str, u32); 5] = [("480p", 480), ("720p", 720), ("1080p", 1080), ("2K", 1440), ("4K", 2160)];
@@ -50,6 +92,9 @@ pub struct Settings {
     pub short_side: u32,
     pub fps: f64,
     pub quality: Quality,
+    /// Custom bitrate (kbps) and whether it is kept constant; only for Quality::Custom.
+    pub kbps: u32,
+    pub constant: bool,
     pub audio: bool,
     pub audio_kbps: u32,
 }
@@ -146,7 +191,9 @@ fn run(p: &Project, pcm: &HashMap<u64, Arc<Vec<i16>>>, images: Arc<ImageStore>, 
         cmd.args(["-map", "0:v", "-map", "1:a", "-c:a", "aac", "-ar", "44100"]);
         cmd.args(["-b:a", &format!("{}k", s.audio_kbps)]);
     }
-    cmd.args(["-c:v", "libx264", "-preset", "veryfast", "-crf", &s.quality.crf().to_string(), "-pix_fmt", "yuv420p", "-movflags", "+faststart"]);
+    cmd.args(["-c:v", "libx264", "-preset", "veryfast"]);
+    cmd.args(rate_args(s));
+    cmd.args(["-pix_fmt", "yuv420p", "-movflags", "+faststart"]);
     cmd.arg(&s.path);
     cmd.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("Couldn't start FFmpeg: {e}"))?;
@@ -197,4 +244,25 @@ fn run(p: &Project, pcm: &HashMap<u64, Arc<Vec<i16>>>, images: Arc<ImageStore>, 
         return Err(format!("FFmpeg stopped: {}", e.lines().last().unwrap_or("unknown error")));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn custom(short_side: u32, kbps: u32, constant: bool) -> Settings {
+        Settings { path: PathBuf::from("x.mp4"), short_side, fps: 30.0, quality: Quality::Custom, kbps, constant, audio: false, audio_kbps: 192 }
+    }
+
+    #[test]
+    fn custom_bitrate_keeps_the_originals_limits() {
+        assert_eq!([480, 720, 1080, 1440, 2160].map(max_kbps), [18000, 30000, 50000, 100000, 240000]);
+        // under 1000 becomes 1000, over the height's highest becomes the highest
+        assert_eq!(rate_args(&custom(1080, 500, false))[1], "1000k");
+        assert_eq!(rate_args(&custom(720, 90000, true))[1], "30000k");
+        assert!(rate_args(&custom(1080, 8000, true)).contains(&"nal-hrd=cbr".to_string()));
+        let mut s = custom(1080, 8000, false);
+        s.quality = Quality::Recommended;
+        assert_eq!(rate_args(&s), vec!["-crf".to_string(), "20".to_string()]);
+    }
 }

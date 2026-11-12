@@ -59,6 +59,8 @@ pub struct ExportDialog {
     pub res: usize,
     pub fps: usize,
     pub quality: export::Quality,
+    pub kbps: u32,
+    pub constant: bool,
     pub audio: bool,
     pub audio_kbps: usize,
 }
@@ -1667,7 +1669,7 @@ impl App {
     pub fn open_export(&mut self) {
         if self.export_dialog.is_none() {
             let folder = std::env::var("USERPROFILE").map(|h| PathBuf::from(h).join("Videos")).unwrap_or_else(|_| PathBuf::from("."));
-            self.export_dialog = Some(ExportDialog { name: self.project.name.clone(), folder, res: 2, fps: 2, quality: export::Quality::Recommended, audio: true, audio_kbps: 0 });
+            self.export_dialog = Some(ExportDialog { name: self.project.name.clone(), folder, res: 2, fps: 2, quality: export::Quality::Recommended, kbps: export::CUSTOM_KBPS_DEFAULT, constant: false, audio: true, audio_kbps: 0 });
         }
     }
 
@@ -1750,11 +1752,23 @@ impl App {
                 ui.end_row();
                 ui.label("Quality");
                 egui::ComboBox::from_id_salt("q").selected_text(d.quality.name()).show_ui(ui, |ui| {
-                    for q in [export::Quality::Lower, export::Quality::Recommended, export::Quality::Higher] {
+                    for q in export::Quality::ALL {
                         ui.selectable_value(&mut d.quality, q, q.name());
                     }
                 });
                 ui.end_row();
+                if d.quality == export::Quality::Custom {
+                    // held between 1000 kbps and the highest for the chosen height, as in the original
+                    let max = export::max_kbps(export::RESOLUTIONS[d.res].1);
+                    d.kbps = d.kbps.clamp(export::CUSTOM_KBPS_MIN, max);
+                    ui.label("Bitrate");
+                    ui.horizontal(|ui| {
+                        ui.add(egui::DragValue::new(&mut d.kbps).range(export::CUSTOM_KBPS_MIN..=max).speed(50.0).suffix(" kbps")).on_hover_text(format!("1000 to {max} kbps at this resolution"));
+                        ui.selectable_value(&mut d.constant, false, "VBR").on_hover_text("Variable bitrate: the number is the average");
+                        ui.selectable_value(&mut d.constant, true, "CBR").on_hover_text("Constant bitrate: the same all the way");
+                    });
+                    ui.end_row();
+                }
                 ui.label("Format");
                 ui.label("MP4 (H.264)");
                 ui.end_row();
@@ -1779,7 +1793,7 @@ impl App {
                     name = "video".into();
                 }
                 let path = d.folder.join(format!("{name}.mp4"));
-                start = Some(export::Settings { path, short_side: export::RESOLUTIONS[d.res].1, fps: export::FRAME_RATES[d.fps], quality: d.quality, audio: d.audio, audio_kbps: export::AUDIO_KBPS[d.audio_kbps] });
+                start = Some(export::Settings { path, short_side: export::RESOLUTIONS[d.res].1, fps: export::FRAME_RATES[d.fps], quality: d.quality, kbps: d.kbps, constant: d.constant, audio: d.audio, audio_kbps: export::AUDIO_KBPS[d.audio_kbps] });
             }
         });
         if again {
@@ -2437,6 +2451,13 @@ impl App {
                         self.detail_tab = 5;
                         self.revision += 1;
                     }
+                }
+            }
+            // CUTSTUDIO_SHOT_EXPORT=1: the Export window with a custom bitrate (a self-check)
+            if self.frame_no == 5 && std::env::var_os("CUTSTUDIO_SHOT_EXPORT").is_some() {
+                self.open_export();
+                if let Some(d) = &mut self.export_dialog {
+                    d.quality = export::Quality::Custom;
                 }
             }
             // CUTSTUDIO_SHOT_PICK=1: every other clip picked together (a self-check)
