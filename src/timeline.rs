@@ -210,8 +210,10 @@ fn row_h(k: TrackKind) -> f32 {
     }
 }
 
+/// Whether a clip can sit on a track as it is: it clashes with no other clip there (the
+/// original's is_segment_overlap_in_target_track 0x1810ac450, skipping the clip itself by id).
 fn fits(track: &Track, c: &Clip) -> bool {
-    track.clips.iter().all(|o| o.id == c.id || c.end() <= o.start + 1e-6 || c.start >= o.end() - 1e-6)
+    track.clips.iter().all(|o| o.id == c.id || !crate::model::overlaps(c, o))
 }
 
 /// Where a clip dropped on a track (other than the main one) goes in when it would cover

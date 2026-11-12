@@ -1397,9 +1397,10 @@ pub struct Project {
 
 /// Whether two clips cover some of the same time. Touching ends don't count: the original's
 /// get_conflict_segments (videoeditor.dll 0x1810bbe70) counts a clash only when
-/// `a.start < b.end` and `b.start < a.end`.
+/// `a.start < b.end` and `b.start < a.end`. A clip with no length never clashes
+/// (DraftQuery::is_segment_overlap_in_target_track 0x1810ac450 skips durations below 1 µs).
 pub fn overlaps(a: &Clip, b: &Clip) -> bool {
-    a.start < b.end() - CLASH_EPS && b.start < a.end() - CLASH_EPS
+    a.duration > 0.0 && b.duration > 0.0 && a.start < b.end() - CLASH_EPS && b.start < a.end() - CLASH_EPS
 }
 
 /// Time (seconds) two clips may share before they count as covering each other: rounding only.
@@ -1723,6 +1724,8 @@ mod case_tests {
         // touching ends aren't a clash; covering is
         assert!(!overlaps(&Clip::new(1, None, 0.0, 1.0), &Clip::new(2, None, 1.0, 1.0)));
         assert!(overlaps(&Clip::new(1, None, 0.0, 1.5), &Clip::new(2, None, 1.0, 1.0)));
+        // a clip with no length never clashes
+        assert!(!overlaps(&Clip::new(1, None, 0.5, 0.0), &Clip::new(2, None, 0.0, 2.0)));
         let b = Clip::new(22, None, 5.0, 1.0);
         let before = p.tracks.len();
         p.place_free_together(TrackKind::Audio, vec![a, b]);
