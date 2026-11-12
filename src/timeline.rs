@@ -264,6 +264,9 @@ struct MovePreview {
     starts: Vec<(u64, f64)>,
     /// The gap opened for it where it will land: (track, start, length).
     slot: Option<(usize, f64, f64)>,
+    /// The floating clips are drawn at their own times (picked clips of one track moving to
+    /// another), not side by side.
+    keep_times: bool,
 }
 
 impl MovePreview {
@@ -311,18 +314,21 @@ fn snap1(t: f64, points: &[f64], thr: f64) -> (f64, Option<f64>) {
 }
 
 /// Where the volume line of a clip lives, if it has one: every clip with sound on a sound
-/// track, and the selected clip elsewhere.
+/// track, and the selected clip elsewhere. It sits in the clip's sound strip (under the
+/// pictures of a video, under the name of a sound clip), not over the pictures, so grabbing a
+/// clip to move it doesn't catch the line by mistake (the person's request).
 fn vol_band(p: &Project, kind: TrackKind, c: &Clip, r: Rect, selected: bool) -> Option<Rect> {
-    if c.text.is_some() {
-        return None;
-    }
     let m = c.media.and_then(|m| p.media(m))?;
-    let sound = m.kind == MediaKind::Audio || (m.kind == MediaKind::Video && m.has_audio);
-    if !sound || !(kind == TrackKind::Audio || m.kind == MediaKind::Audio || selected) || r.height() < 12.0 {
+    if !(kind == TrackKind::Audio || m.kind == MediaKind::Audio || selected) {
         return None;
     }
-    Some(r.shrink2(vec2(0.0, 5.0)))
+    sound_band(p, kind, c, r).map(|b| b.shrink2(vec2(0.0, VOL_BAND_PAD))).filter(|b| b.height() >= VOL_BAND_MIN_H)
 }
+
+/// Space kept above and below the volume line's band inside the sound strip (pixels).
+const VOL_BAND_PAD: f32 = 0.0;
+/// The shortest band the volume line is drawn in (pixels); shorter strips have no line.
+const VOL_BAND_MIN_H: f32 = 6.0;
 
 /// Clip looks measured from the person's picture of the original's timeline: a name bar along
 /// the top of every picture and sound clip, a sound strip along the bottom of a video with
@@ -373,11 +379,29 @@ fn fade_handles(c: &Clip, band: Rect, view: View) -> (Pos2, Pos2) {
     (pos2(xi, y), pos2(xo, y))
 }
 
-/// Height on the band for a level, in dB: VOL_DB_MIN (and silence) at the bottom,
-/// +20 dB at the top, so 0 dB (unchanged) sits three quarters up.
+/// How far up the sound strip an unchanged level (0 dB) is drawn: measured from the person's
+/// picture of the original (the line's middle 6.4 px up a 15 px strip).
+const VOL_ZERO_AT: f32 = 0.43;
+/// The volume line as the original draws it (measured from the same picture): one pixel of
+/// white at about 24% over the strip (the strip's rgb 0, 77, 82 turns 60, 119, 123).
+const VOL_LINE_W: f32 = 1.0;
+const VOL_LINE: Color32 = Color32::from_rgba_premultiplied(60, 60, 60, 60);
+
+/// Share of the band's height for a level in dB: VOL_DB_MIN (and silence) at the bottom,
+/// 0 dB at VOL_ZERO_AT, +20 dB at the top, straight in dB on each side of 0 dB.
+fn vol_share(db: f32) -> f32 {
+    let db = db.max(VOL_DB_MIN);
+    if db <= 0.0 {
+        (db - VOL_DB_MIN) / (0.0 - VOL_DB_MIN) * VOL_ZERO_AT
+    } else {
+        VOL_ZERO_AT + db / VOL_DB_MAX * (1.0 - VOL_ZERO_AT)
+    }
+    .clamp(0.0, 1.0)
+}
+
+/// Height on the band for a level.
 fn vol_y(band: Rect, gain: f32) -> f32 {
-    let db = gain_to_db(gain).max(VOL_DB_MIN);
-    band.bottom() - ((db - VOL_DB_MIN) / (VOL_DB_MAX - VOL_DB_MIN)).clamp(0.0, 1.0) * band.height()
+    band.bottom() - vol_share(gain_to_db(gain)) * band.height()
 }
 
 /// Level for a height on the band (the very bottom is silent).
@@ -386,7 +410,8 @@ fn vol_from_y(top: f32, bottom: f32, y: f32) -> f32 {
     if f <= 0.01 {
         return 0.0;
     }
-    db_to_gain(VOL_DB_MIN + f * (VOL_DB_MAX - VOL_DB_MIN))
+    let db = if f <= VOL_ZERO_AT { VOL_DB_MIN + f / VOL_ZERO_AT * (0.0 - VOL_DB_MIN) } else { (f - VOL_ZERO_AT) / (1.0 - VOL_ZERO_AT) * VOL_DB_MAX };
+    db_to_gain(db)
 }
 
 /// The volume line on screen: the clip's start, its points and its end.
@@ -441,10 +466,12 @@ impl App {
     fn move_preview(&self, rows: &[Row], ptr: Option<Pos2>, view: View) -> Option<MovePreview> {
         let d = self.tl_drag.as_ref().filter(|d| d.kind == DragKind::Move)?;
         let p = ptr?;
-        if !d.main && !d.group.is_empty() {
-            return None;
-        }
         let (ti, ci) = self.project.find_clip(d.clip_id)?;
+        if !d.main && !d.group.is_empty() {
+            // the grabbed clip and the picked clips of its track follow the pointer together
+            let floating = self.same_track_set(d);
+            return Some(MovePreview { floating, starts: vec![], slot: None, keep_times: true });
+        }
         let kind = self.project.tracks[ti].kind;
         let mut c = if d.main { d.orig.clone()? } else { self.project.tracks[ti].clips[ci].clone() };
         c.start = d.ghost;
@@ -487,12 +514,23 @@ impl App {
         let t = view.t(p.x);
         let one = [d.clip_id];
         let mut floating = vec![d.clip_id];
+        // the picked main-track clips going up together: side by side from here
+        let before: f64 = block.iter().take_while(|&&id| id != d.clip_id).filter_map(|&id| self.project.clip(id)).map(|x| x.duration).sum();
+        let block_start = (d.ghost - before).max(0.0);
         match (kind, target.map(|r| (r.ti, r.kind))) {
+            (TrackKind::Main, Some((tti, TrackKind::Overlay))) if visual && block.len() > 1 => {
+                pack_main(&block, None, &mut starts, &mut slot);
+                slot = Some((tti, block_start, block_len));
+                floating = block.clone();
+            }
             (TrackKind::Main, Some((tti, TrackKind::Overlay))) if visual => {
                 pack_main(&one, None, &mut starts, &mut slot);
                 put_in(tti, &mut starts, &mut slot);
             }
-            (TrackKind::Main, None) if above && visual => pack_main(&one, None, &mut starts, &mut slot),
+            (TrackKind::Main, None) if above && visual => {
+                pack_main(&block, None, &mut starts, &mut slot);
+                floating = block.clone();
+            }
             (TrackKind::Main, _) => {
                 pack_main(&block, Some((self.main_insert_index_skip(t, &block), block_len)), &mut starts, &mut slot);
                 floating = block.clone();
@@ -506,7 +544,14 @@ impl App {
                 }
             }
         }
-        Some(MovePreview { floating, starts, slot })
+        Some(MovePreview { floating, starts, slot, keep_times: false })
+    }
+
+    /// The grabbed clip (not on the main track) and the other picked clips on its track, in
+    /// the track's order: they change track together.
+    fn same_track_set(&self, d: &TlDrag) -> Vec<u64> {
+        let Some((ti, _)) = self.project.find_clip(d.clip_id) else { return vec![] };
+        self.project.tracks[ti].clips.iter().map(|c| c.id).filter(|&id| id == d.clip_id || d.group.iter().any(|g| g.0 == id)).collect()
     }
 
     /// The main-track clips a drag of a main-track clip moves: the grabbed one and the other
@@ -610,6 +655,51 @@ impl App {
         v
     }
 
+    /// Take the picked main-track clips out, in their order, laid side by side from where the
+    /// grabbed one is let go (as they were drawn following the pointer).
+    fn take_main_block(&mut self, mi: usize, block: &[u64], d: &TlDrag) -> Vec<Clip> {
+        let clips = std::mem::take(&mut self.project.tracks[mi].clips);
+        let (mut moved, rest): (Vec<Clip>, Vec<Clip>) = clips.into_iter().partition(|c| block.contains(&c.id));
+        self.project.tracks[mi].clips = rest;
+        let before: f64 = moved.iter().take_while(|c| c.id != d.clip_id).map(|c| c.duration).sum();
+        let mut at = (d.ghost - before).max(0.0);
+        for c in moved.iter_mut() {
+            c.start = at;
+            c.transition = None;
+            at += c.duration;
+        }
+        moved
+    }
+
+    /// Take these clips off track `ti`, keeping their times.
+    fn take_set(&mut self, ti: usize, ids: &[u64]) -> Vec<Clip> {
+        let clips = std::mem::take(&mut self.project.tracks[ti].clips);
+        let (moved, rest): (Vec<Clip>, Vec<Clip>) = clips.into_iter().partition(|c| ids.contains(&c.id));
+        self.project.tracks[ti].clips = rest;
+        moved
+    }
+
+    /// Clips that move together onto track `ti`: there if all of them fit, otherwise together
+    /// onto one track where they do (Project::place_free_together).
+    fn put_set_on(&mut self, ti: usize, kind: TrackKind, clips: Vec<Clip>) {
+        let ok = self.project.tracks.get(ti).map(|t| t.kind == kind && !t.locked && clips.iter().all(|c| t.clips.iter().all(|o| !crate::model::overlaps(c, o)))).unwrap_or(false);
+        if ok {
+            let t = &mut self.project.tracks[ti];
+            t.clips.extend(clips);
+            t.clips.sort_by(|a, b| a.start.total_cmp(&b.start));
+        } else {
+            self.project.place_free_together(kind, clips);
+        }
+    }
+
+    /// A new track of `kind` holding these clips.
+    fn new_track_with_all(&mut self, kind: TrackKind, mut clips: Vec<Clip>) {
+        clips.sort_by(|a, b| a.start.total_cmp(&b.start));
+        let tid = self.project.new_id();
+        let pos = self.project.tracks.iter().rposition(|t| t.kind == kind).map(|p| p + 1).unwrap_or(self.project.tracks.len());
+        self.project.tracks.insert(pos, Track { id: tid, kind, clips, muted: false, hidden: false, locked: false });
+    }
+
     fn new_track_with(&mut self, kind: TrackKind, clip: Clip) {
         let tid = self.project.new_id();
         let pos = self.project.tracks.iter().rposition(|t| t.kind == kind).map(|p| p + 1).unwrap_or(self.project.tracks.len());
@@ -640,13 +730,6 @@ impl App {
         true
     }
 
-    fn put_on(&mut self, ti: usize, kind: TrackKind, clip: Clip) {
-        if ti < self.project.tracks.len() && self.project.tracks[ti].kind == kind && !self.project.tracks[ti].locked && fits(&self.project.tracks[ti], &clip) {
-            self.project.tracks[ti].clips.push(clip);
-        } else {
-            self.project.place_free(kind, clip);
-        }
-    }
 
     fn tl_toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
@@ -1210,10 +1293,12 @@ impl App {
                     vec![grabbed.clone()]
                 };
                 let before: f64 = floating.iter().take_while(|x| x.id != d.clip_id).map(|x| x.duration).sum();
-                let mut at = d.ghost - before;
+                let mut at = (d.ghost - before).max(0.0);
                 for mut c in floating {
-                    c.start = at;
-                    at += c.duration;
+                    if !m.keep_times {
+                        c.start = at;
+                        at += c.duration;
+                    }
                     let w = (c.duration as f32 * view.zoom).max(4.0);
                     let r = Rect::from_min_size(pos2(view.x(c.start), y), vec2(w, fh));
                     painter.rect_filled(r.translate(vec2(0.0, 3.0)), 4.0, Color32::from_black_alpha(90));
@@ -1452,7 +1537,19 @@ impl App {
         let mut c = self.project.tracks[ti].clips[ci].clone();
         let visual = c.text.is_none() && c.media.and_then(|m| self.project.media(m)).map(|m| m.is_visual()).unwrap_or(false);
         let target_locked = target.map(|(t, _)| self.project.tracks[t].locked).unwrap_or(false);
+        let block = self.main_block(d);
+        let set = if d.main { vec![] } else { self.same_track_set(d) };
         match (src_kind, target) {
+            // picked main-track clips taken up together: side by side, in their order, from
+            // where the grabbed one is let go
+            (TrackKind::Main, Some((tti, TrackKind::Overlay))) if visual && !target_locked && block.len() > 1 => {
+                let clips = self.take_main_block(ti, &block, d);
+                self.put_set_on(tti, TrackKind::Overlay, clips);
+            }
+            (TrackKind::Main, None) if above && visual && block.len() > 1 => {
+                let clips = self.take_main_block(ti, &block, d);
+                self.new_track_with_all(TrackKind::Overlay, clips);
+            }
             (TrackKind::Main, Some((tti, TrackKind::Overlay))) if visual && !target_locked => {
                 self.project.tracks[ti].clips.remove(ci);
                 c.start = d.ghost;
@@ -1467,7 +1564,6 @@ impl App {
             }
             (TrackKind::Main, _) => {
                 // the grabbed clip and the picked main-track clips, in their order, go in together
-                let block = self.main_block(d);
                 let idx = self.main_insert_index_skip(view.t(p.x), &block);
                 let clips = std::mem::take(&mut self.project.tracks[ti].clips);
                 let (moved, mut rest): (Vec<Clip>, Vec<Clip>) = clips.into_iter().partition(|c| block.contains(&c.id));
@@ -1490,16 +1586,22 @@ impl App {
             }
             (k, Some((tti, tk))) if tk == k => {
                 if tti != ti && !target_locked {
-                    self.project.tracks[ti].clips.remove(ci);
-                    self.put_on(tti, k, c);
+                    // the picked clips of the grabbed one's track go along to the new track
+                    let clips = self.take_set(ti, &set);
+                    self.put_set_on(tti, k, clips);
                 } else if !fits(&self.project.tracks[ti], &c) {
                     self.project.tracks[ti].clips.remove(ci);
                     self.project.place_free(k, c);
                 }
             }
             (k, None) if above && (k == TrackKind::Overlay || k == TrackKind::Text) => {
-                self.project.tracks[ti].clips.remove(ci);
-                self.new_track_with(k, c);
+                if set.len() > 1 {
+                    let clips = self.take_set(ti, &set);
+                    self.new_track_with_all(k, clips);
+                } else {
+                    self.project.tracks[ti].clips.remove(ci);
+                    self.new_track_with(k, c);
+                }
             }
             (k, _) => {
                 if !fits(&self.project.tracks[ti], &c) {
@@ -1706,12 +1808,12 @@ impl App {
         // volume line with its points
         if let Some(band) = vol_band(&self.project, kind, c, r, sel) {
             let line = vol_polyline(c, band, view);
-            let col = Color32::from_rgb(255, 214, 10);
-            cp.add(egui::Shape::line(line, Stroke::new(1.5_f32, col)));
+            let col = Color32::from_rgb(235, 235, 240);
+            cp.add(egui::Shape::line(line, Stroke::new(VOL_LINE_W, VOL_LINE)));
             for vp in &c.vol_points {
                 let q = pos2(view.x(c.start + vp.t), vol_y(band, c.volume * vp.g));
-                cp.circle_filled(q, 4.0, col);
-                cp.circle_stroke(q, 4.0, Stroke::new(1.0_f32, BG0));
+                cp.circle_filled(q, 3.0, col);
+                cp.circle_stroke(q, 3.0, Stroke::new(1.0_f32, BG0));
             }
         }
         // label
@@ -1856,6 +1958,20 @@ fn short_dur(d: f64) -> String {
 #[cfg(test)]
 mod zoom_tests {
     use super::*;
+
+    #[test]
+    fn the_volume_line_sits_where_the_original_draws_it() {
+        let band = Rect::from_min_max(pos2(0.0, 0.0), pos2(100.0, 100.0));
+        // unchanged volume 43% up, +20 dB at the top, silence at the bottom
+        assert!((vol_y(band, 1.0) - 57.0).abs() < 0.01);
+        assert!(vol_y(band, 10.0).abs() < 0.01);
+        assert_eq!(vol_y(band, 0.0), 100.0);
+        // a height and back gives the same level
+        for g in [0.05_f32, 0.5, 1.0, 2.0, 8.0] {
+            let y = vol_y(band, g);
+            assert!((vol_from_y(0.0, 100.0, y) - g).abs() / g < 0.01, "{g}");
+        }
+    }
 
     #[test]
     fn slider_runs_level_by_level_and_back() {
