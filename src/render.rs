@@ -922,8 +922,10 @@ fn raster_flat(s: &TextStyle, visible: usize, px: f32, max_w: f32, words: Option
         }
     }
     let sf = font.as_scaled(PxScale::from(px));
-    let spacing = s.letter_spacing * px * 0.02;
-    let line_h = sf.height() + sf.line_gap() + s.line_spacing * px * 0.05;
+    // the original keeps both as the shown value / 20 (acceptLetterSpacing, acceptLineSpacing in
+    // the text panel), a share of the font size
+    let spacing = s.letter_spacing * px * TEXT_SPACING_PER_SHOWN;
+    let line_h = sf.height() + sf.line_gap() + s.line_spacing * px * TEXT_SPACING_PER_SHOWN;
     // wrap into lines
     let mut lines: Vec<Vec<char>> = vec![];
     // each drawn character's index in `content`, line by line
@@ -1123,6 +1125,8 @@ fn raster_flat(s: &TextStyle, visible: usize, px: f32, max_w: f32, words: Option
 /// own, estimated: the original turns them into pixels in a packed library). Chosen so the
 /// panel's defaults draw as CapCraft's text looked before: background 14 → 0.28 × size beside
 /// the text, shadow distance 5 → 0.06 × size, shadow blur 15 → 0.05 × size.
+/// Letter and line spacing: shown / 20 of the font size.
+pub const TEXT_SPACING_PER_SHOWN: f32 = 1.0 / 20.0;
 pub const TEXT_BG_PAD_X: f32 = 2.0;
 pub const TEXT_BG_PAD_Y: f32 = 1.2;
 pub const TEXT_BG_SHIFT: f32 = 2.0;

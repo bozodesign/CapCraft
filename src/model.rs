@@ -14,7 +14,19 @@ pub const TEXT_ANIM_LEN: f32 = 0.5;
 /// Plain text default size (saved projects).
 pub const CAPTION_SIZE_DEFAULT: f32 = 15.0;
 pub const CAPTION_PX_DIVISOR: f32 = 180.0;
+/// Captions keep the outline most of the person's projects use (MECHANICS.md, Captions); the
+/// original's new text has 0.08 (+0x2d8 below), which the panel's Reset puts back.
 pub const CAPTION_STROKE_W: f32 = 0.06;
+/// What a new text starts with in the original (MaterialText::MaterialText 0x1808ca5e0, read
+/// through its getters): line spacing 0.2 (get_line_spacing +0x238; the panel shows x 20, so
+/// 4), outline 0.08 (get_border_width +0x2d8, shown 40 above), shadow distance 8
+/// (get_shadow_distance +0x278), smoothing 0 (+0x270), opacity 0.8 (get_shadow_alpha +0x268),
+/// angle -45 (+0x290); font size 15 (+0x370), background 0.14 wide and high (+0x540, +0x548),
+/// fully opaque (+0x528), not moved (+0x550, +0x558), square corners (+0x538).
+pub const TEXT_LINE_SPACING_NEW: f32 = 4.0;
+pub const TEXT_SHADOW_DIST_NEW: f32 = 8.0;
+pub const TEXT_SHADOW_BLUR_NEW: f32 = 0.0;
+pub const TEXT_SHADOW_ALPHA_NEW: u8 = 204;
 
 // The original's text panel (FunctionPanel QML, the text "basic" style page): what each control
 // shows, its range and what Reset puts back. MECHANICS.md, "Text options".
@@ -1238,9 +1250,9 @@ impl TextStyle {
             background: false,
             bg_color: [0, 0, 0, 255],
             shadow: false,
-            shadow_color: [0, 0, 0, 230],
+            shadow_color: [0, 0, 0, TEXT_SHADOW_ALPHA_NEW],
             letter_spacing: 0.0,
-            line_spacing: 0.0,
+            line_spacing: TEXT_LINE_SPACING_NEW,
             opacity: TEXT_OPACITY_RESET,
             vertical: false,
             bg_wrap: false,
@@ -1249,8 +1261,8 @@ impl TextStyle {
             bg_w: TEXT_BG_SIZE_RESET,
             bg_dy: TEXT_BG_OFFSET_RESET,
             bg_dx: TEXT_BG_OFFSET_RESET,
-            shadow_blur: TEXT_SHADOW_BLUR_RESET,
-            shadow_dist: TEXT_SHADOW_DIST_RESET,
+            shadow_blur: TEXT_SHADOW_BLUR_NEW,
+            shadow_dist: TEXT_SHADOW_DIST_NEW,
             shadow_angle: TEXT_SHADOW_ANGLE_RESET,
             glow: false,
             glow_color: [255, 255, 255, 255],
@@ -1302,7 +1314,12 @@ impl TextStyle {
     pub fn reset_options(&mut self) {
         let mut f = TextStyle::new(&self.content, self.kind);
         f.font = std::mem::take(&mut self.font);
+        // the panel's Reset values, which differ from what a new text starts with
         f.stroke_width = TEXT_STROKE_RESET / TEXT_STROKE_SHOWN;
+        f.line_spacing = 0.0;
+        f.shadow_blur = TEXT_SHADOW_BLUR_RESET;
+        f.shadow_dist = TEXT_SHADOW_DIST_RESET;
+        f.shadow_color[3] = (TEXT_SHADOW_ALPHA_RESET / 100.0 * 255.0).round() as u8;
         f.word_times = std::mem::take(&mut self.word_times);
         f.word_texts = std::mem::take(&mut self.word_texts);
         f.word_mode = self.word_mode;
@@ -1899,7 +1916,7 @@ impl Project {
         c.duration = (b.end() - a.start).max(a.duration);
         c.fade_out = b.fade_out;
         if let Some(s) = c.text.as_mut() {
-            s.join_words(tb, b.start - a.start);
+            s.join_words(tb);
             s.anim_out = tb.anim_out;
             s.anim_out_len = tb.anim_out_len;
         }
@@ -1946,9 +1963,13 @@ impl Project {
     }
 }
 
-/// The shortest part Enter may leave on either side of a cut (seconds; CapCraft's own,
-/// estimated: the original's rule sits in a packed library).
-pub const CAPTION_PIECE_MIN: f64 = 0.1;
+/// The shortest part a split may leave on either side of the cut: 33000 µs
+/// (TextClipUtils::min_split_time 0x1840b88b8, checked by TextClipUtils::checkSplitPos
+/// 0x182654f00, which refuses a cut closer than that to either end).
+pub const CAPTION_PIECE_MIN: f64 = 0.033;
+/// When joined words of the second caption start at 0 ms, they go this much after the first
+/// caption's last word (RichTextUtils::mergeWords 0x18271a000 → FUN_18270aa90).
+pub const MERGE_WORD_GAP_MS: i32 = 100;
 
 /// Hesitation words "Remove filler words" takes out (CapCraft's own list: the original finds
 /// them with its online speech service).
@@ -1965,9 +1986,11 @@ impl TextStyle {
     pub fn split_words(&self, at: usize, dur: f64) -> Option<(f64, (String, Vec<[i32; 2]>, Vec<String>), (String, Vec<[i32; 2]>, Vec<String>))> {
         let chars: Vec<char> = self.content.chars().collect();
         let at = at.min(chars.len());
-        let a: String = chars[..at].iter().collect::<String>().trim_end().to_string();
-        let b: String = chars[at..].iter().collect::<String>().trim_start().to_string();
-        if a.is_empty() || b.is_empty() || dur < CAPTION_PIECE_MIN * 2.0 {
+        // the text is cut exactly at the cursor, spaces kept (RichTextUtils::splitRichText
+        // 0x182721260); a part with nothing to show isn't made (CapCraft's own)
+        let a: String = chars[..at].iter().collect();
+        let b: String = chars[at..].iter().collect();
+        if a.trim().is_empty() || b.trim().is_empty() || dur < CAPTION_PIECE_MIN * 2.0 {
             return None;
         }
         let spans = self.spans(dur);
@@ -1976,7 +1999,9 @@ impl TextStyle {
             let letters = |s: &[char]| s.iter().filter(|c| !c.is_whitespace()).count() as f64;
             dur * letters(&chars[..at]) / letters(&chars).max(1.0)
         });
-        let cut = cut.clamp(CAPTION_PIECE_MIN, dur - CAPTION_PIECE_MIN);
+        if cut < CAPTION_PIECE_MIN || dur - cut < CAPTION_PIECE_MIN {
+            return None;
+        }
         let ms = (cut * 1000.0).round() as i32;
         let (mut wa, mut xa, mut wb, mut xb) = (vec![], vec![], vec![], vec![]);
         if self.heard() {
@@ -1993,19 +2018,23 @@ impl TextStyle {
         Some((cut, (a, wa, xa), (b, wb, xb)))
     }
 
-    /// Put the next caption's words after these; `gap` is how far (seconds) its start is from
-    /// this one's. Heard times stay when both had them.
-    pub fn join_words(&mut self, next: &TextStyle, gap: f64) {
-        let both = self.heard() && next.heard();
-        let sep = if self.content.ends_with(char::is_whitespace) || next.content.starts_with(char::is_whitespace) { "" } else { " " };
-        self.content = format!("{}{sep}{}", self.content, next.content);
-        if both {
-            let ms = (gap * 1000.0).round() as i32;
-            self.word_times.extend(next.word_times.iter().map(|t| [t[0] + ms, t[1] + ms]));
-            self.word_texts.extend(next.word_texts.iter().cloned());
-        } else {
+    /// Put the next caption's words after these, as the original joins two captions: the texts
+    /// one after the other with nothing put between (RichTextUtils::mergeRichTextOrNormalText
+    /// 0x1827199b0), and the heard words of each that has them, the second's moved to follow
+    /// the first's last word, 100 ms later when they start at 0 (RichTextUtils::mergeWords
+    /// 0x18271a000, FUN_18270aa90).
+    pub fn join_words(&mut self, next: &TextStyle) {
+        self.content = format!("{}{}", self.content, next.content);
+        let had = self.heard();
+        if !had {
             self.word_times.clear();
             self.word_texts.clear();
+        }
+        if next.heard() {
+            let last = if had { self.word_times.last().map(|t| t[1]).unwrap_or(0) } else { 0 };
+            let ms = if next.word_times.first().map(|t| t[0]) == Some(0) { last + MERGE_WORD_GAP_MS } else { last };
+            self.word_times.extend(next.word_times.iter().map(|t| [t[0] + ms, t[1] + ms]));
+            self.word_texts.extend(next.word_texts.iter().cloned());
         }
     }
 }
@@ -2153,7 +2182,7 @@ mod caption_list_tests {
         }
         let b = p.split_caption(id, 12).expect("split");
         let (ca, cb) = (p.clip(id).unwrap().clone(), p.clip(b).unwrap().clone());
-        assert_eq!(ca.text.as_ref().unwrap().content, "hello there");
+        assert_eq!(ca.text.as_ref().unwrap().content, "hello there ");
         assert_eq!(cb.text.as_ref().unwrap().content, "world");
         assert!((ca.duration - 2.0).abs() < 1e-9 && (cb.start - 3.0).abs() < 1e-9 && (cb.end() - 4.0).abs() < 1e-9);
         assert_eq!(cb.text.as_ref().unwrap().word_times, vec![[0, 900]]);
@@ -2162,7 +2191,8 @@ mod caption_list_tests {
         let c = p.clip(id).unwrap();
         let s = c.text.as_ref().unwrap();
         assert_eq!(s.content, "hello there world");
-        assert_eq!(s.word_times, vec![[0, 800], [900, 1700], [2000, 2900]]);
+        // the second's words follow the first's last word, 100 ms later as they start at 0
+        assert_eq!(s.word_times, vec![[0, 800], [900, 1700], [1800, 2700]]);
         assert!((c.end() - 4.0).abs() < 1e-9 && p.clip(b).is_none());
     }
 
@@ -2172,8 +2202,12 @@ mod caption_list_tests {
         let id = caption(&mut p, "ab cdef", 0.0, 3.0);
         let b = p.split_caption(id, 2).unwrap();
         assert!((p.clip(id).unwrap().duration - 1.0).abs() < 1e-9);
-        assert_eq!(p.clip(b).unwrap().text.as_ref().unwrap().content, "cdef");
+        // cut right at the cursor, the space kept, as the original's splitRichText does
+        assert_eq!(p.clip(b).unwrap().text.as_ref().unwrap().content, " cdef");
         assert!(p.split_caption(b, 0).is_none(), "nothing before the cursor");
+        // a cut closer than 0.033 s to an end is refused
+        let c = caption(&mut p, "a bcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz", 10.0, 1.0);
+        assert!(p.split_caption(c, 1).is_none());
     }
 
     #[test]
