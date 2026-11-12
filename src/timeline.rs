@@ -228,6 +228,29 @@ fn move_target(rows: &[Row], y: f32, from_main: bool) -> Option<Row> {
     rows.iter().find(|r| r.hit_y(y)).copied()
 }
 
+/// While a main-track clip is moved: the gap opened where it will go in, how far the clip is
+/// lifted above the track (share of its height) and how tall it is drawn while it follows the
+/// pointer (as in the person's picture of the original).
+const MOVE_SLOT: Color32 = Color32::from_rgb(52, 52, 56);
+const MOVE_LIFT: f32 = 0.3;
+const MOVE_FLOAT_H: f32 = 0.65;
+
+/// Where clips are drawn while one is being moved, before it is let go.
+struct MovePreview {
+    /// The clip drawn following the pointer instead of in its track.
+    floating: Option<u64>,
+    /// Where the other clips would start if it were let go now.
+    starts: Vec<(u64, f64)>,
+    /// The gap opened on the main track for it (start, length).
+    slot: Option<(f64, f64)>,
+}
+
+impl MovePreview {
+    fn at(&self, id: u64) -> Option<f64> {
+        self.starts.iter().find(|s| s.0 == id).map(|s| s.1)
+    }
+}
+
 /// How far into a clip a drop goes in after it rather than before it (half way).
 pub const INSERT_SIDE: f64 = 0.5;
 
@@ -280,6 +303,29 @@ fn vol_band(p: &Project, kind: TrackKind, c: &Clip, r: Rect, selected: bool) -> 
     Some(r.shrink2(vec2(0.0, 5.0)))
 }
 
+/// Clip looks measured from the person's picture of the original's timeline: a name bar along
+/// the top of every picture and sound clip, a sound strip along the bottom of a video with
+/// sound (about a fifth of the clip), and bars that rise from the bottom, one pixel wide with a
+/// pixel between them.
+const CLIP_HEAD_H: f32 = 16.0;
+const SOUND_STRIP_TOP: f32 = 0.78;
+const WAVE_STEP: f32 = 2.0;
+const VIDEO_HEAD: Color32 = Color32::from_rgb(26, 95, 100);
+const VIDEO_SOUND_BG: Color32 = Color32::from_rgb(0, 77, 82);
+const VIDEO_SOUND_BAR: Color32 = Color32::from_rgb(0, 119, 126);
+const AUDIO_HEAD: Color32 = Color32::from_rgb(39, 69, 105);
+const AUDIO_BODY: Color32 = Color32::from_rgb(14, 48, 88);
+const AUDIO_BAR: Color32 = Color32::from_rgb(14, 129, 179);
+
+/// Height of a clip's name bar: none on clips too short to have one.
+fn head_h(inner: Rect) -> f32 {
+    if inner.height() > 34.0 {
+        CLIP_HEAD_H
+    } else {
+        0.0
+    }
+}
+
 /// Where a clip's sound is drawn: the whole clip for sound, the strip under the pictures
 /// for a video with sound. None for clips without sound.
 fn sound_band(p: &Project, kind: TrackKind, c: &Clip, r: Rect) -> Option<Rect> {
@@ -290,10 +336,9 @@ fn sound_band(p: &Project, kind: TrackKind, c: &Clip, r: Rect) -> Option<Rect> {
     let inner = r.shrink(1.0);
     if m.kind == MediaKind::Audio || (kind == TrackKind::Audio && m.has_audio) {
         // under the clip's name, as in the original
-        let top = if inner.height() > 34.0 { inner.top() + 16.0 } else { inner.top() };
-        Some(Rect::from_min_max(pos2(inner.left(), top), inner.max))
+        Some(Rect::from_min_max(pos2(inner.left(), inner.top() + head_h(inner)), inner.max))
     } else if m.kind == MediaKind::Video && m.has_audio {
-        Some(Rect::from_min_max(pos2(inner.left(), inner.top() + inner.height() * 0.68), inner.max))
+        Some(Rect::from_min_max(pos2(inner.left(), inner.top() + inner.height() * SOUND_STRIP_TOP), inner.max))
     } else {
         None
     }
@@ -367,6 +412,53 @@ impl App {
         let clips = &self.project.tracks[row.ti].clips;
         let tl = Project::transition_len(clips, i);
         pos2(view.x(clips[i + 1].start + tl / 2.0), row.rect.center().y)
+    }
+
+    /// While a clip is moved, the layout it would leave if let go now: on the main track the
+    /// other clips close up where it was and open a gap where it will go in (it follows the
+    /// pointer); on other tracks the clips after the join it would go in at move right.
+    fn move_preview(&self, rows: &[Row], ptr: Option<Pos2>, view: View) -> Option<MovePreview> {
+        let d = self.tl_drag.as_ref().filter(|d| d.kind == DragKind::Move)?;
+        let p = ptr?;
+        if d.main {
+            let o = d.orig.as_ref()?;
+            let mi = self.project.main_index();
+            let on_main = move_target(rows, p.y, true).map(|r| r.kind == TrackKind::Main).unwrap_or(false);
+            let mut clips: Vec<Clip> = self.project.tracks[mi].clips.iter().filter(|c| c.id != d.clip_id).cloned().collect();
+            let mut slot_i = None;
+            if on_main {
+                let idx = self.main_insert_index(view.t(p.x), Some(d.clip_id)).min(clips.len());
+                let mut c = o.clone();
+                c.transition = None;
+                clips.insert(idx, c);
+                slot_i = Some(idx);
+            }
+            let (mut t, mut starts, mut slot) = (0.0, vec![], None);
+            for i in 0..clips.len() {
+                if Some(i) == slot_i {
+                    slot = Some((t, clips[i].duration));
+                } else {
+                    starts.push((clips[i].id, t));
+                }
+                t += clips[i].duration - Project::transition_len(&clips, i);
+            }
+            return Some(MovePreview { floating: Some(d.clip_id), starts, slot });
+        }
+        if !d.group.is_empty() {
+            return None;
+        }
+        let (ti, ci) = self.project.find_clip(d.clip_id)?;
+        let kind = self.project.tracks[ti].kind;
+        let row = rows.iter().find(|r| r.hit_y(p.y)).copied().filter(|r| r.kind == kind)?;
+        if self.project.tracks[row.ti].locked {
+            return None;
+        }
+        let c = self.project.tracks[ti].clips[ci].clone();
+        let mut copy = self.project.tracks[row.ti].clone();
+        insert_point(&copy, &c)?;
+        insert_on(&mut copy, c);
+        let starts = copy.clips.iter().filter(|x| x.id != d.clip_id).map(|x| (x.id, x.start)).collect();
+        Some(MovePreview { floating: None, starts, slot: None })
     }
 
     /// While the start of a main-track clip is being trimmed: the clip's place on the track and
@@ -962,13 +1054,24 @@ impl App {
         // the pointer (and snaps to the playhead) and the clips after it stay where they were;
         // the track closes the gap when it's let go
         let trim_shift = self.main_trim_shift();
+        // moving a clip: where the other clips would be if it were let go now
+        let mv = self.move_preview(&rows, ptr, view);
         let picked = self.group();
         for row in &rows {
             let tr = &self.project.tracks[row.ti];
             for (ci, c) in tr.clips.iter().enumerate() {
+                if mv.as_ref().map(|m| m.floating == Some(c.id)).unwrap_or(false) {
+                    continue;
+                }
                 let shifted;
-                let c = match trim_shift {
-                    Some((from, dt)) if row.kind == TrackKind::Main && ci >= from => {
+                let c = match (trim_shift, mv.as_ref().and_then(|m| m.at(c.id))) {
+                    (_, Some(s)) => {
+                        let mut s2 = c.clone();
+                        s2.start = s;
+                        shifted = s2;
+                        &shifted
+                    }
+                    (Some((from, dt)), _) if row.kind == TrackKind::Main && ci >= from => {
                         let mut s = c.clone();
                         s.start += dt;
                         shifted = s;
@@ -984,7 +1087,7 @@ impl App {
                 let dim = dragging_main == Some(c.id) || tr.hidden;
                 self.draw_clip(&painter, c, row.kind, r, sel, dim, view, content);
             }
-            if row.kind == TrackKind::Main && tr.clips.len() > 1 {
+            if row.kind == TrackKind::Main && tr.clips.len() > 1 && dragging_main.is_none() {
                 for i in 0..tr.clips.len() - 1 {
                     let mut jc = self.junction_center(row, view, i);
                     if let Some((_, dt)) = trim_shift.filter(|&(from, _)| i >= from) {
@@ -1014,16 +1117,21 @@ impl App {
             if let (Some(o), Some(p)) = (&d.orig, ptr) {
                 let row = move_target(&rows, p.y, true).or_else(|| rows.iter().find(|r| r.kind == TrackKind::Main).copied());
                 if let Some(row) = row {
-                    let r = Rect::from_min_size(pos2(view.x(d.ghost), row.rect.top() + 1.0), vec2((o.duration as f32 * view.zoom).max(4.0), row.rect.height() - 2.0));
-                    painter.rect_filled(r, 4.0, Color32::from_rgba_unmultiplied(239, 45, 72, 70));
-                    painter.rect_stroke(r, 4.0, Stroke::new(1.5_f32, ACCENT), StrokeKind::Inside);
-                    if row.kind == TrackKind::Main {
-                        let mi = self.project.main_index();
-                        let idx = self.main_insert_index(view.t(p.x), Some(d.clip_id));
-                        let others: Vec<&Clip> = self.project.tracks[mi].clips.iter().filter(|c| c.id != d.clip_id).collect();
-                        let t = if idx == 0 { 0.0 } else { others.get(idx - 1).map(|c| c.end()).unwrap_or(0.0) };
-                        let x = view.x(t);
-                        painter.line_segment([pos2(x, row.rect.top() - 4.0), pos2(x, row.rect.bottom() + 4.0)], Stroke::new(3.0_f32, ACCENT));
+                    let w = (o.duration as f32 * view.zoom).max(4.0);
+                    if let Some((s, len)) = mv.as_ref().and_then(|m| m.slot) {
+                        // the gap opened where it will go in, and the clip itself following the
+                        // pointer, lifted a little above the track
+                        let slot = Rect::from_min_max(pos2(view.x(s), row.rect.top() + 1.0), pos2(view.x(s + len), row.rect.bottom() - 1.0));
+                        painter.rect_filled(slot, 4.0, MOVE_SLOT);
+                        let h = row.rect.height();
+                        let r = Rect::from_min_size(pos2(view.x(d.ghost), row.rect.top() - h * MOVE_LIFT), vec2(w, h * MOVE_FLOAT_H));
+                        let mut c = o.clone();
+                        c.start = d.ghost;
+                        self.draw_clip(&painter, &c, row.kind, r, true, false, view, content);
+                    } else {
+                        let r = Rect::from_min_size(pos2(view.x(d.ghost), row.rect.top() + 1.0), vec2(w, row.rect.height() - 2.0));
+                        painter.rect_filled(r, 4.0, Color32::from_rgba_unmultiplied(239, 45, 72, 70));
+                        painter.rect_stroke(r, 4.0, Stroke::new(1.5_f32, ACCENT), StrokeKind::Inside);
                     }
                 }
             }
@@ -1384,10 +1492,15 @@ impl App {
             (TrackKind::Overlay, _) => CLIP_OVERLAY,
             _ => CLIP_VIDEO,
         };
+        let is_sound = media.map(|m| m.kind == MediaKind::Audio || (kind == TrackKind::Audio && m.has_audio)).unwrap_or(false) && c.text.is_none();
+        let base = if is_sound { AUDIO_BODY } else { base };
+        // pictures and sound get the original's name bar along the top
+        let headed = c.text.is_none() && media.map(|m| matches!(m.kind, MediaKind::Video | MediaKind::Image | MediaKind::Audio)).unwrap_or(false);
         let vis = r.intersect(content);
         let cp = painter.with_clip_rect(vis);
         cp.rect_filled(r, 4.0, base);
         let inner = r.shrink(1.0);
+        let hh = if headed { head_h(inner) } else { 0.0 };
         // pictures along the clip
         if let Some(m) = media {
             if m.kind == MediaKind::Color {
@@ -1403,7 +1516,8 @@ impl App {
                 mesh.add_triangle(i, i + 2, i + 3);
                 cp.add(mesh);
             } else if let Some(thumbs) = self.thumbs.get(&m.id).filter(|t| !t.is_empty() && kind != TrackKind::Audio) {
-                let strip_h = if m.has_audio && kind != TrackKind::Audio { inner.height() * 0.68 } else { inner.height() };
+                // between the name bar and the sound strip
+                let strip_h = if m.has_audio && kind != TrackKind::Audio { inner.height() * SOUND_STRIP_TOP } else { inner.height() } - hh;
                 let sz = thumbs[0].1.size_vec2();
                 let tw = (strip_h * sz.x / sz.y.max(1.0)).max(8.0);
                 let first = ((vis.left() - inner.left()) / tw).floor().max(0.0) as i32;
@@ -1417,35 +1531,32 @@ impl App {
                     let st = c.src_time(tc);
                     let idx = thumbs.partition_point(|(t, _)| *t < st).min(thumbs.len() - 1);
                     let idx = if idx > 0 && (thumbs[idx - 1].0 - st).abs() < (thumbs[idx].0 - st).abs() { idx - 1 } else { idx };
-                    let tr = Rect::from_min_size(pos2(x0, inner.top()), vec2(tw, strip_h));
+                    let tr = Rect::from_min_size(pos2(x0, inner.top() + hh), vec2(tw, strip_h));
                     cp.with_clip_rect(vis.intersect(inner)).image(thumbs[idx].1.id(), tr, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
                     k += 1;
                 }
             }
             // sound wave
             if m.kind == MediaKind::Audio || (m.kind == MediaKind::Video && m.has_audio) {
-                if let Some(w) = self.waves.get(&m.id) {
-                    let band = if m.kind == MediaKind::Audio || kind == TrackKind::Audio {
-                        inner
-                    } else {
-                        Rect::from_min_max(pos2(inner.left(), inner.top() + inner.height() * 0.68), inner.max)
-                    };
-                    if band.top() > inner.top() {
-                        cp.rect_filled(band, 0.0, Color32::from_rgba_unmultiplied(10, 40, 30, 200));
-                    }
-                    let mid = band.center().y;
-                    let amp = band.height() * 0.45 * c.volume.min(2.0).max(0.0) / c.volume.max(1.0).min(2.0).max(1.0);
-                    let wc = if c.volume <= 0.0 { MUTED } else { Color32::from_rgb(120, 230, 170) };
-                    let mut x = vis.left().max(band.left());
-                    while x < vis.right().min(band.right()) {
-                        let tc = view.t(x);
-                        let st = c.src_time(tc);
-                        let i = (st * 50.0) as usize;
-                        let v = w.get(i).copied().unwrap_or(0.0).min(1.0);
-                        let lvl = c.vol_env(tc - c.start).min(1.0);
-                        let h = (v * amp * lvl).max(0.5);
-                        cp.line_segment([pos2(x, mid - h), pos2(x, mid + h)], Stroke::new(1.5_f32, wc));
-                        x += 2.0;
+                if let Some(band) = sound_band(&self.project, kind, c, r) {
+                    let (bg, bar) = if is_sound { (AUDIO_BODY, AUDIO_BAR) } else { (VIDEO_SOUND_BG, VIDEO_SOUND_BAR) };
+                    cp.rect_filled(band, 0.0, bg);
+                    if let Some(w) = self.waves.get(&m.id) {
+                        // bars rising from the bottom of the strip, as in the original
+                        let amp = (band.height() - 2.0).max(1.0) * c.volume.min(2.0).max(0.0) / c.volume.max(1.0).min(2.0).max(1.0);
+                        let wc = if c.volume <= 0.0 { MUTED } else { bar };
+                        let bottom = band.bottom() - 1.0;
+                        let mut x = (vis.left().max(band.left()) / WAVE_STEP).floor() * WAVE_STEP + 0.5;
+                        while x < vis.right().min(band.right()) {
+                            let tc = view.t(x);
+                            let st = c.src_time(tc);
+                            let i = (st * 50.0) as usize;
+                            let v = w.get(i).copied().unwrap_or(0.0).min(1.0);
+                            let lvl = c.vol_env(tc - c.start).min(1.0);
+                            let h = (v * amp * lvl).max(1.0);
+                            cp.line_segment([pos2(x, bottom - h), pos2(x, bottom)], Stroke::new(1.0_f32, wc));
+                            x += WAVE_STEP;
+                        }
                     }
                 }
             }
@@ -1509,7 +1620,12 @@ impl App {
         let font = FontId::proportional(11.0);
         let galley = cp.layout_no_wrap(crate::thai::ui(&label), font, TEXT);
         let lr = Rect::from_min_size(lp - vec2(3.0, 1.0), galley.size() + vec2(6.0, 2.0));
-        if c.text.is_none() {
+        if hh > 0.0 {
+            // the name bar right along the clip
+            let head = Rect::from_min_size(inner.min, vec2(inner.width(), hh));
+            let rounding = egui::CornerRadius { nw: 3, ne: 3, sw: 0, se: 0 };
+            cp.rect_filled(head, rounding, if is_sound { AUDIO_HEAD } else { VIDEO_HEAD });
+        } else if c.text.is_none() {
             cp.rect_filled(lr, 3.0, Color32::from_rgba_unmultiplied(0, 0, 0, 120));
         }
         cp.galley(lp, galley, TEXT);

@@ -2496,7 +2496,16 @@ impl App {
                 println!("self-check: picked {} clips", ids.len());
                 self.pick(ids);
             }
-            if self.frame_no >= 120 && !self.shot_requested {
+            // CUTSTUDIO_SHOT_SOUNDTRACK=1: the first video's sound also as a clip on a sound track
+            if self.frame_no == 30 && std::env::var_os("CUTSTUDIO_SHOT_SOUNDTRACK").is_some() {
+                if let Some(mid) = self.project.media.iter().find(|m| m.kind == MediaKind::Video && m.has_audio).map(|m| m.id) {
+                    let id = self.project.new_id();
+                    self.project.place_free(TrackKind::Audio, Clip::new(id, Some(mid), 2.0, 4.0));
+                }
+            }
+            // CUTSTUDIO_SHOT_WAIT=<frames>: take the picture later (sound waves load in the background)
+            let shot_at = std::env::var("CUTSTUDIO_SHOT_WAIT").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(120);
+            if self.frame_no >= shot_at && !self.shot_requested {
                 self.shot_requested = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
             }
