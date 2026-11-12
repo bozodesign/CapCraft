@@ -281,21 +281,37 @@ pub const INSERT_SIDE: f64 = 0.5;
 /// Put a clip on a track (other than the main one) at its start. If it would cover clips
 /// there, it goes in at the join (`insert_point`) and every clip from there on moves right
 /// just enough to make room, keeping the gaps between them.
-fn insert_on(track: &mut Track, mut c: Clip) {
-    track.clips.retain(|o| o.id != c.id);
-    if let Some(at) = insert_point(track, &c) {
-        c.start = at.max(0.0);
-        let after = |o: &Clip| o.start >= c.start - 1e-6;
-        if let Some(next) = track.clips.iter().filter(|o| after(o)).map(|o| o.start).min_by(f64::total_cmp) {
-            let shift = c.end() - next;
+fn insert_on(track: &mut Track, c: Clip) {
+    insert_set_on(track, vec![c]);
+}
+
+/// Clips moving together put in on a track the way one clip is (`insert_on`): the whole set,
+/// from its first start to its last end with the times between kept, counts as one clip; it
+/// goes in at the join and the clips after it move right.
+fn insert_set_on(track: &mut Track, mut set: Vec<Clip>) {
+    if set.is_empty() {
+        return;
+    }
+    track.clips.retain(|o| set.iter().all(|c| c.id != o.id));
+    let s0 = set.iter().map(|c| c.start).fold(f64::INFINITY, f64::min);
+    let e0 = set.iter().map(|c| c.end()).fold(f64::NEG_INFINITY, f64::max);
+    // the set as one clip (an id no clip has)
+    let span = Clip::new(u64::MAX, None, s0, e0 - s0);
+    if let Some(at) = insert_point(track, &span) {
+        let at = at.max(0.0);
+        for c in set.iter_mut() {
+            c.start += at - s0;
+        }
+        if let Some(next) = track.clips.iter().filter(|o| o.start >= at - 1e-6).map(|o| o.start).min_by(f64::total_cmp) {
+            let shift = at + (e0 - s0) - next;
             if shift > 0.0 {
-                for o in track.clips.iter_mut().filter(|o| o.start >= c.start - 1e-6) {
+                for o in track.clips.iter_mut().filter(|o| o.start >= at - 1e-6) {
                     o.start += shift;
                 }
             }
         }
     }
-    track.clips.push(c);
+    track.clips.extend(set);
     track.clips.sort_by(|a, b| a.start.total_cmp(&b.start));
 }
 
@@ -473,11 +489,6 @@ impl App {
         let d = self.tl_drag.as_ref().filter(|d| d.kind == DragKind::Move)?;
         let p = ptr?;
         let (ti, ci) = self.project.find_clip(d.clip_id)?;
-        if !d.main && !d.group.is_empty() {
-            // the grabbed clip and the picked clips of its track follow the pointer together
-            let floating = self.same_track_set(d);
-            return Some(MovePreview { floating, starts: vec![], slot: None, keep_times: true });
-        }
         let kind = self.project.tracks[ti].kind;
         let mut c = if d.main { d.orig.clone()? } else { self.project.tracks[ti].clips[ci].clone() };
         c.start = d.ghost;
@@ -518,6 +529,37 @@ impl App {
             }
         };
         let t = view.t(p.x);
+        // several picked clips of one track (not the main one): they follow the pointer at their
+        // own times and go in together as one clip does
+        if !d.main && !d.group.is_empty() {
+            let ids = self.same_track_set(d);
+            let set: Vec<Clip> = ids.iter().filter_map(|&id| self.project.clip(id).cloned()).collect();
+            match target.map(|r| (r.ti, r.kind)) {
+                Some((tti, tk)) if tk == kind => {
+                    let mut copy = self.project.tracks[tti].clone();
+                    insert_set_on(&mut copy, set.clone());
+                    let mut s0 = f64::INFINITY;
+                    let mut e0 = f64::NEG_INFINITY;
+                    for x in &copy.clips {
+                        if ids.contains(&x.id) {
+                            s0 = s0.min(x.start);
+                            e0 = e0.max(x.end());
+                        } else {
+                            starts.push((x.id, x.start));
+                        }
+                    }
+                    if s0.is_finite() {
+                        slot = Some((tti, s0, e0 - s0));
+                    }
+                }
+                Some((_, TrackKind::Main)) if kind == TrackKind::Overlay && self.all_visual(&ids) => {
+                    let len: f64 = set.iter().map(|x| x.duration).sum();
+                    pack_main(&[], Some((self.main_insert_index(t, None), len)), &mut starts, &mut slot);
+                }
+                _ => {}
+            }
+            return Some(MovePreview { floating: ids, starts, slot, keep_times: true });
+        }
         let one = [d.clip_id];
         let mut floating = vec![d.clip_id];
         // the picked main-track clips going up together: side by side from here
@@ -526,7 +568,27 @@ impl App {
         match (kind, target.map(|r| (r.ti, r.kind))) {
             (TrackKind::Main, Some((tti, TrackKind::Overlay))) if visual && block.len() > 1 => {
                 pack_main(&block, None, &mut starts, &mut slot);
-                slot = Some((tti, block_start, block_len));
+                // the block put in on the overlay track as one clip would be
+                let mut copy = self.project.tracks[tti].clone();
+                let mut at = block_start;
+                let mut laid: Vec<Clip> = vec![];
+                for &id in &block {
+                    if let Some(mut x) = self.project.clip(id).cloned() {
+                        x.start = at;
+                        at += x.duration;
+                        laid.push(x);
+                    }
+                }
+                insert_set_on(&mut copy, laid);
+                let mut s0 = f64::INFINITY;
+                for x in &copy.clips {
+                    if block.contains(&x.id) {
+                        s0 = s0.min(x.start);
+                    } else {
+                        starts.push((x.id, x.start));
+                    }
+                }
+                slot = Some((tti, if s0.is_finite() { s0 } else { block_start }, block_len));
                 floating = block.clone();
             }
             (TrackKind::Main, Some((tti, TrackKind::Overlay))) if visual => {
@@ -677,6 +739,16 @@ impl App {
         moved
     }
 
+    /// Whether all these clips are pictures or videos (can go on the main track).
+    fn all_visual(&self, ids: &[u64]) -> bool {
+        ids.iter().all(|&id| {
+            self.project
+                .clip(id)
+                .map(|c| c.text.is_none() && c.media.and_then(|m| self.project.media(m)).map(|m| m.is_visual()).unwrap_or(false))
+                .unwrap_or(false)
+        })
+    }
+
     /// Take these clips off track `ti`, keeping their times.
     fn take_set(&mut self, ti: usize, ids: &[u64]) -> Vec<Clip> {
         let clips = std::mem::take(&mut self.project.tracks[ti].clips);
@@ -685,18 +757,6 @@ impl App {
         moved
     }
 
-    /// Clips that move together onto track `ti`: there if all of them fit, otherwise together
-    /// onto one track where they do (Project::place_free_together).
-    fn put_set_on(&mut self, ti: usize, kind: TrackKind, clips: Vec<Clip>) {
-        let ok = self.project.tracks.get(ti).map(|t| t.kind == kind && !t.locked && clips.iter().all(|c| t.clips.iter().all(|o| !crate::model::overlaps(c, o)))).unwrap_or(false);
-        if ok {
-            let t = &mut self.project.tracks[ti];
-            t.clips.extend(clips);
-            t.clips.sort_by(|a, b| a.start.total_cmp(&b.start));
-        } else {
-            self.project.place_free_together(kind, clips);
-        }
-    }
 
     /// A new track of `kind` holding these clips.
     fn new_track_with_all(&mut self, kind: TrackKind, mut clips: Vec<Clip>) {
@@ -1550,7 +1610,7 @@ impl App {
             // where the grabbed one is let go
             (TrackKind::Main, Some((tti, TrackKind::Overlay))) if visual && !target_locked && block.len() > 1 => {
                 let clips = self.take_main_block(ti, &block, d);
-                self.put_set_on(tti, TrackKind::Overlay, clips);
+                insert_set_on(&mut self.project.tracks[tti], clips);
             }
             (TrackKind::Main, None) if above && visual && block.len() > 1 => {
                 let clips = self.take_main_block(ti, &block, d);
@@ -1577,6 +1637,18 @@ impl App {
                 rest.splice(idx..idx, moved);
                 self.project.tracks[ti].clips = rest;
             }
+            // several picked overlay clips dropped on the main track go in together, in their order
+            (TrackKind::Overlay, Some((tti, TrackKind::Main))) if visual && !target_locked && set.len() > 1 && self.all_visual(&set) => {
+                let idx = self.main_insert_index(view.t(p.x), None);
+                let mut clips = self.take_set(ti, &set);
+                clips.sort_by(|a, b| a.start.total_cmp(&b.start));
+                for c in clips.iter_mut() {
+                    c.transition = None;
+                }
+                let main = &mut self.project.tracks[tti].clips;
+                let idx = idx.min(main.len());
+                main.splice(idx..idx, clips);
+            }
             (TrackKind::Overlay, Some((tti, TrackKind::Main))) if visual && !target_locked => {
                 let idx = self.main_insert_index(view.t(p.x), None);
                 self.project.tracks[ti].clips.remove(ci);
@@ -1590,12 +1662,15 @@ impl App {
                 self.project.tracks[ti].clips.remove(ci);
                 insert_on(&mut self.project.tracks[tti], c);
             }
-            (k, Some((tti, tk))) if tk == k => {
-                if tti != ti && !target_locked {
-                    // the picked clips of the grabbed one's track go along to the new track
-                    let clips = self.take_set(ti, &set);
-                    self.put_set_on(tti, k, clips);
-                } else if !fits(&self.project.tracks[ti], &c) {
+            // several picked clips dropped on a track of their kind go in as one clip does: at
+            // the join, the clips after them moving right
+            (k, Some((tti, tk))) if tk == k && !target_locked => {
+                let clips = self.take_set(ti, &set);
+                insert_set_on(&mut self.project.tracks[tti], clips);
+            }
+            // a locked track: the clip stays on its own track
+            (k, Some((_, tk))) if tk == k => {
+                if !fits(&self.project.tracks[ti], &c) {
                     self.project.tracks[ti].clips.remove(ci);
                     self.project.place_free(k, c);
                 }
@@ -1966,6 +2041,25 @@ fn short_dur(d: f64) -> String {
 #[cfg(test)]
 mod zoom_tests {
     use super::*;
+
+    #[test]
+    fn picked_clips_go_in_at_the_join_as_one_clip_does() {
+        // a track with clips at 0-2 and 2-4; two picked clips (1 s each, 1 s apart) dropped
+        // starting inside the first clip, past its middle: they go in at its end (2 s), keep
+        // the second apart from the first, and the clip after moves right by the set's 3 s
+        let mut tr = Track { id: 1, kind: TrackKind::Overlay, clips: vec![Clip::new(10, None, 0.0, 2.0), Clip::new(11, None, 2.0, 2.0)], muted: false, hidden: false, locked: false };
+        let set = vec![Clip::new(20, None, 1.5, 1.0), Clip::new(21, None, 3.5, 1.0)];
+        insert_set_on(&mut tr, set);
+        let at = |id: u64| tr.clips.iter().find(|c| c.id == id).unwrap().start;
+        assert_eq!(at(10), 0.0);
+        assert_eq!(at(20), 2.0);
+        assert_eq!(at(21), 4.0);
+        assert_eq!(at(11), 5.0);
+        // one clip goes in the same way
+        let mut one = Track { id: 2, kind: TrackKind::Overlay, clips: vec![Clip::new(10, None, 0.0, 2.0), Clip::new(11, None, 2.0, 2.0)], muted: false, hidden: false, locked: false };
+        insert_on(&mut one, Clip::new(20, None, 1.5, 1.0));
+        assert_eq!(one.clips.iter().map(|c| (c.id, c.start)).collect::<Vec<_>>(), vec![(10, 0.0), (20, 2.0), (11, 3.0)]);
+    }
 
     #[test]
     fn the_volume_line_sits_where_the_original_draws_it() {
