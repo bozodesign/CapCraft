@@ -683,7 +683,7 @@ impl App {
     }
 
     /// A video or sound lasts its own length; a picture lasts the Image duration from Settings.
-    fn default_len(&self, m: &Media) -> f64 {
+    pub(crate) fn default_len(&self, m: &Media) -> f64 {
         if m.has_length() {
             m.duration
         } else {

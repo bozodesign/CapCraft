@@ -193,6 +193,46 @@ fn fits(track: &Track, c: &Clip) -> bool {
     track.clips.iter().all(|o| o.id == c.id || c.end() <= o.start + 1e-6 || c.start >= o.end() - 1e-6)
 }
 
+/// Where a clip dropped on a track (other than the main one) goes in when it would cover
+/// clips there: dropped inside a clip, at that clip's nearer end (the join), otherwise where
+/// it was dropped. None when it fits as it is.
+fn insert_point(track: &Track, c: &Clip) -> Option<f64> {
+    if fits(track, c) {
+        return None;
+    }
+    let s = c.start;
+    let inside = track.clips.iter().find(|o| o.id != c.id && o.start < s - 1e-6 && s < o.end() - 1e-6);
+    Some(match inside {
+        Some(o) if s - o.start > o.duration * INSERT_SIDE => o.end(),
+        Some(o) => o.start,
+        None => s,
+    })
+}
+
+/// How far into a clip a drop goes in after it rather than before it (half way).
+pub const INSERT_SIDE: f64 = 0.5;
+
+/// Put a clip on a track (other than the main one) at its start. If it would cover clips
+/// there, it goes in at the join (`insert_point`) and every clip from there on moves right
+/// just enough to make room, keeping the gaps between them.
+fn insert_on(track: &mut Track, mut c: Clip) {
+    track.clips.retain(|o| o.id != c.id);
+    if let Some(at) = insert_point(track, &c) {
+        c.start = at.max(0.0);
+        let after = |o: &Clip| o.start >= c.start - 1e-6;
+        if let Some(next) = track.clips.iter().filter(|o| after(o)).map(|o| o.start).min_by(f64::total_cmp) {
+            let shift = c.end() - next;
+            if shift > 0.0 {
+                for o in track.clips.iter_mut().filter(|o| o.start >= c.start - 1e-6) {
+                    o.start += shift;
+                }
+            }
+        }
+    }
+    track.clips.push(c);
+    track.clips.sort_by(|a, b| a.start.total_cmp(&b.start));
+}
+
 fn snap1(t: f64, points: &[f64], thr: f64) -> (f64, Option<f64>) {
     let mut best: Option<(f64, f64)> = None;
     for &p in points {
@@ -405,6 +445,30 @@ impl App {
         let tid = self.project.new_id();
         let pos = self.project.tracks.iter().rposition(|t| t.kind == kind).map(|p| p + 1).unwrap_or(self.project.tracks.len());
         self.project.tracks.insert(pos, Track { id: tid, kind, clips: vec![clip], muted: false, hidden: false, locked: false });
+    }
+
+    /// A library item dropped on one overlay or sound track: it goes in there at `t`, making
+    /// room as `insert_on` does. False when it can't go on that track (wrong kind, locked).
+    fn add_media_on(&mut self, media_id: u64, ti: usize, t: f64) -> bool {
+        let Some(m) = self.project.media(media_id).cloned() else { return false };
+        let Some((kind, locked)) = self.project.tracks.get(ti).map(|tr| (tr.kind, tr.locked)) else { return false };
+        let ok = match kind {
+            TrackKind::Audio => m.kind == MediaKind::Audio,
+            TrackKind::Overlay => m.kind != MediaKind::Audio,
+            _ => false,
+        };
+        if !ok || locked {
+            return false;
+        }
+        let id = self.project.new_id();
+        let mut c = Clip::new(id, Some(media_id), t.max(0.0), self.default_len(&m));
+        if kind == TrackKind::Overlay {
+            c.transform.scale = 0.5;
+        }
+        insert_on(&mut self.project.tracks[ti], c);
+        self.project.relayout();
+        self.selection = Selection::Clip(id);
+        true
     }
 
     fn put_on(&mut self, ti: usize, kind: TrackKind, clip: Clip) {
@@ -814,9 +878,22 @@ impl App {
                 let row = rows.iter().find(|r| r.hit_y(p.y)).copied();
                 let above = rows.first().map(|r| p.y < r.rect.top() - 3.0).unwrap_or(true);
                 let (t, _) = snap1(view.t(p.x).max(0.0), &self.snap_points(u64::MAX, false), thr);
-                drop_line = Some((view.x(t), row.map(|r| r.rect)));
+                // over an overlay or sound track with clips in the way: the line shows the join it goes in at
+                let mut line_t = t;
+                if let (LibItem::Media(mid), Some(r)) = (&item, row) {
+                    if matches!(r.kind, TrackKind::Overlay | TrackKind::Audio) {
+                        if let Some(m) = self.project.media(*mid) {
+                            let probe = Clip::new(u64::MAX, Some(*mid), t, self.default_len(m));
+                            if let Some(at) = insert_point(&self.project.tracks[r.ti], &probe) {
+                                line_t = at;
+                            }
+                        }
+                    }
+                }
+                drop_line = Some((view.x(line_t), row.map(|r| r.rect)));
                 if ui.input(|i| i.pointer.any_released()) {
                     match item {
+                        LibItem::Media(id) if row.map(|r| self.add_media_on(id, r.ti, t)).unwrap_or(false) => {}
                         LibItem::Media(id) => {
                             let kind = match row.map(|r| r.kind) {
                                 Some(TrackKind::Overlay) | Some(TrackKind::Text) => Some(TrackKind::Overlay),
@@ -928,6 +1005,17 @@ impl App {
                         let x = view.x(t);
                         painter.line_segment([pos2(x, row.rect.top() - 4.0), pos2(x, row.rect.bottom() + 4.0)], Stroke::new(3.0_f32, ACCENT));
                     }
+                }
+            }
+        }
+        // a clip moved over others on its own kind of track: where it would go in
+        if let Some(d) = self.tl_drag.as_ref().filter(|d| d.kind == DragKind::Move && !d.main && d.group.is_empty()) {
+            let kind = self.project.find_clip(d.clip_id).map(|(ti, _)| self.project.tracks[ti].kind);
+            let row = ptr.and_then(|p| rows.iter().find(|r| r.hit_y(p.y)).copied()).filter(|r| Some(r.kind) == kind);
+            if let (Some(row), Some(c)) = (row, self.project.clip(d.clip_id)) {
+                if let Some(at) = insert_point(&self.project.tracks[row.ti], c) {
+                    let x = view.x(at);
+                    painter.line_segment([pos2(x, row.rect.top() - 4.0), pos2(x, row.rect.bottom() + 4.0)], Stroke::new(3.0_f32, ACCENT));
                 }
             }
         }
@@ -1142,7 +1230,7 @@ impl App {
                 self.project.tracks[ti].clips.remove(ci);
                 c.start = d.ghost;
                 c.transition = None;
-                self.put_on(tti, TrackKind::Overlay, c);
+                insert_on(&mut self.project.tracks[tti], c);
             }
             (TrackKind::Main, None) if above && visual => {
                 self.project.tracks[ti].clips.remove(ci);
@@ -1163,6 +1251,12 @@ impl App {
                 let main = &mut self.project.tracks[tti].clips;
                 let idx = idx.min(main.len());
                 main.insert(idx, c);
+            }
+            // one clip dropped over others on a track of its kind: it goes in at the join and
+            // the clips after it move right
+            (k, Some((tti, tk))) if tk == k && d.group.is_empty() && !target_locked => {
+                self.project.tracks[ti].clips.remove(ci);
+                insert_on(&mut self.project.tracks[tti], c);
             }
             (k, Some((tti, tk))) if tk == k => {
                 if tti != ti && !target_locked {
@@ -1539,5 +1633,23 @@ mod zoom_tests {
         assert_eq!(RULER_LEVELS[ruler_level(300.0)].1, 1.0);
         assert_eq!(RULER_LEVELS[ruler_level(700.0)].2, 15);
         assert_eq!(ruler_level(0.0001), 0);
+    }
+
+    #[test]
+    fn a_drop_at_a_join_pushes_the_clips_after_it_right() {
+        let mut tr = Track { id: 1, kind: TrackKind::Overlay, clips: vec![Clip::new(10, None, 0.0, 2.0), Clip::new(11, None, 2.0, 2.0), Clip::new(12, None, 6.0, 1.0)], muted: false, hidden: false, locked: false };
+        // dropped 70 % into the first clip: goes in at its end, the next ones move 3 s right
+        insert_on(&mut tr, Clip::new(20, None, 1.4, 3.0));
+        let at: Vec<(u64, f64)> = tr.clips.iter().map(|c| (c.id, c.start)).collect();
+        assert_eq!(at, vec![(10, 0.0), (20, 2.0), (11, 5.0), (12, 9.0)]);
+        // dropped in a gap where it fits: nothing moves
+        insert_on(&mut tr, Clip::new(21, None, 7.0, 1.0));
+        assert_eq!(tr.clips.iter().find(|c| c.id == 21).unwrap().start, 7.0);
+        assert_eq!(tr.clips.iter().find(|c| c.id == 12).unwrap().start, 9.0);
+        // dropped early in a clip: goes in before it
+        insert_on(&mut tr, Clip::new(22, None, 0.3, 1.0));
+        assert_eq!(tr.clips[0].id, 22);
+        assert_eq!(tr.clips[1].start, 1.0);
+        assert!(tr.clips.windows(2).all(|w| w[0].end() <= w[1].start + 1e-9));
     }
 }
