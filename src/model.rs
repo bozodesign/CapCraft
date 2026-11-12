@@ -1606,6 +1606,44 @@ impl Project {
         self.relayout();
     }
 
+    /// Pasted clips (not main-track ones), each with the place its track had among the tracks
+    /// of its kind, in the order they were copied. The original's paste, per clip
+    /// (DraftQuery::findTargetIndex 0x181086d80 → find_target_track_index 0x181089200): start
+    /// at the larger of its own track's place and the place the clip before it got; from there
+    /// up, skip locked tracks and take the first where its time is free; with none, the track
+    /// count (a new track of its kind, after the others).
+    pub fn paste_on_tracks(&mut self, clips: Vec<(TrackKind, usize, Clip)>) {
+        let mut last: Vec<(TrackKind, usize)> = vec![];
+        for (kind, home, clip) in clips {
+            let prev = last.iter().find(|(k, _)| *k == kind).map(|(_, i)| *i).unwrap_or(0);
+            let from = home.max(prev);
+            let of_kind: Vec<usize> = self.tracks.iter().enumerate().filter(|(_, t)| t.kind == kind).map(|(i, _)| i).collect();
+            let found = of_kind.iter().enumerate().skip(from).find(|(_, &ti)| {
+                let t = &self.tracks[ti];
+                !t.locked && t.clips.iter().all(|o| !overlaps(&clip, o))
+            });
+            let got = match found {
+                Some((k, &ti)) => {
+                    let t = &mut self.tracks[ti];
+                    t.clips.push(clip);
+                    t.clips.sort_by(|a, b| a.start.total_cmp(&b.start));
+                    k
+                }
+                None => {
+                    let tid = self.new_id();
+                    let pos = of_kind.last().map(|p| p + 1).unwrap_or(self.tracks.len());
+                    self.tracks.insert(pos, Track { id: tid, kind, clips: vec![clip], muted: false, hidden: false, locked: false });
+                    of_kind.len()
+                }
+            };
+            match last.iter_mut().find(|(k, _)| *k == kind) {
+                Some(e) => e.1 = got,
+                None => last.push((kind, got)),
+            }
+        }
+        self.relayout();
+    }
+
     /// Place a clip on a track of `kind` at its start, using the first track
     /// where it doesn't overlap, or a new one.
     pub fn place_free(&mut self, kind: TrackKind, clip: Clip) -> u64 {
@@ -1735,5 +1773,33 @@ mod case_tests {
         let (tb, _) = p.find_clip(22).unwrap();
         assert_eq!(ta, tb);
         assert_eq!(p.clip(22).unwrap().start, 5.0);
+    }
+
+    #[test]
+    fn pasted_clips_go_up_from_their_own_track_like_the_original() {
+        let mut p = Project::new("t");
+        let audio = |p: &mut Project, clips: Vec<Clip>| {
+            let id = p.new_id();
+            p.tracks.push(Track { id, kind: TrackKind::Audio, clips, muted: false, hidden: false, locked: false });
+            id
+        };
+        let t0 = audio(&mut p, vec![Clip::new(30, None, 0.0, 10.0)]);
+        let t1 = audio(&mut p, vec![]);
+        // copied from the first sound track; that one is taken at the paste time, so the next up
+        p.paste_on_tracks(vec![(TrackKind::Audio, 0, Clip::new(40, None, 2.0, 1.0))]);
+        assert_eq!(p.tracks[p.find_clip(40).unwrap().0].id, t1);
+        // the clip after one never goes below it, even where a lower track is free
+        p.paste_on_tracks(vec![
+            (TrackKind::Audio, 1, Clip::new(41, None, 20.0, 1.0)),
+            (TrackKind::Audio, 0, Clip::new(42, None, 20.0, 1.0)),
+        ]);
+        assert_eq!(p.tracks[p.find_clip(41).unwrap().0].id, t1);
+        let t42 = p.tracks[p.find_clip(42).unwrap().0].id;
+        assert!(t42 != t0 && t42 != t1);
+        // a locked track is skipped
+        let ti1 = p.tracks.iter().position(|t| t.id == t1).unwrap();
+        p.tracks[ti1].locked = true;
+        p.paste_on_tracks(vec![(TrackKind::Audio, 1, Clip::new(43, None, 50.0, 1.0))]);
+        assert!(p.tracks[p.find_clip(43).unwrap().0].id != t1);
     }
 }

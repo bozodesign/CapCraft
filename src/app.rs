@@ -107,7 +107,8 @@ pub struct App {
     /// the player shows that frame while not playing.
     pub tl_hover_t: Option<f64>,
     /// Clips copied with Ctrl+C: each with the kind and id of the track it was on.
-    pub clip_copy: Vec<(TrackKind, u64, Clip)>,
+    /// Copied clips: kind, the place of its track among the tracks of its kind, the clip.
+    pub clip_copy: Vec<(TrackKind, usize, Clip)>,
     pub timeline_rect: Rect,
     pub preview_rect: Rect,
 
@@ -1303,7 +1304,10 @@ impl App {
         for id in self.group() {
             if let Some((ti, ci)) = self.project.find_clip(id) {
                 let t = &self.project.tracks[ti];
-                v.push((t.kind, t.id, t.clips[ci].clone()));
+                // where its track sits among the tracks of its kind (the original keeps this
+                // with each copied clip: PasteSegmentInfo +0x94, read in findTargetIndex 0x181086d80)
+                let kind_idx = self.project.tracks[..ti].iter().filter(|o| o.kind == t.kind).count();
+                v.push((t.kind, kind_idx, t.clips[ci].clone()));
             }
         }
         if v.is_empty() {
@@ -1317,9 +1321,12 @@ impl App {
     }
 
     /// Ctrl+V: put the copied clips in at the playhead, keeping the times between them.
-    /// Main-track clips go in on the main track at the place the playhead is, in their order;
-    /// the others go back on the track they came from when they fit there, otherwise together
-    /// on one free track of their kind.
+    /// Main-track clips go in on the main track at the place the playhead is, in their order.
+    /// The others follow the original's paste (DraftQuery::findTargetIndex 0x181086d80 and
+    /// find_target_track_index 0x181089200), one clip after another: its time moves by the paste
+    /// offset; the search starts at the larger of its own track's place among the tracks of its
+    /// kind and the track the clip before it went on; the first unlocked track from there up
+    /// where its time is free takes it; if none does, a new track of its kind.
     pub fn paste_at_playhead(&mut self) {
         if self.clip_copy.is_empty() {
             return;
@@ -1328,9 +1335,9 @@ impl App {
         let s0 = self.clip_copy.iter().map(|(_, _, c)| c.start).fold(f64::INFINITY, f64::min);
         let mut new_ids = vec![];
         let mut main_clips = vec![];
-        let mut by_track: Vec<(TrackKind, u64, Vec<Clip>)> = vec![];
+        let mut others: Vec<(TrackKind, usize, Clip)> = vec![];
         let copy = self.clip_copy.clone();
-        for (kind, tid, c) in copy {
+        for (kind, kind_idx, c) in copy {
             let mut n = c.clone();
             n.id = self.project.new_id();
             new_ids.push(n.id);
@@ -1340,10 +1347,7 @@ impl App {
                 continue;
             }
             n.start = (t0 + (c.start - s0)).max(0.0);
-            match by_track.iter_mut().find(|(k, t, _)| *k == kind && *t == tid) {
-                Some((_, _, v)) => v.push(n),
-                None => by_track.push((kind, tid, vec![n])),
-            }
+            others.push((kind, kind_idx, n));
         }
         if !main_clips.is_empty() {
             let mi = self.project.main_index();
@@ -1356,18 +1360,7 @@ impl App {
                 self.project.tracks[mi].clips.splice(idx..idx, main_clips);
             }
         }
-        for (kind, tid, clips) in by_track {
-            let home = self.project.tracks.iter().position(|t| t.id == tid && t.kind == kind && !t.locked);
-            let fits = home.map(|ti| clips.iter().all(|c| self.project.tracks[ti].clips.iter().all(|o| !crate::model::overlaps(c, o)))).unwrap_or(false);
-            match home {
-                Some(ti) if fits => {
-                    let t = &mut self.project.tracks[ti];
-                    t.clips.extend(clips);
-                    t.clips.sort_by(|a, b| a.start.total_cmp(&b.start));
-                }
-                _ => self.project.place_free_together(kind, clips),
-            }
-        }
+        self.project.paste_on_tracks(others);
         self.project.relayout();
         self.pick(new_ids);
     }
