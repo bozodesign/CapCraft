@@ -209,6 +209,25 @@ fn insert_point(track: &Track, c: &Clip) -> Option<f64> {
     })
 }
 
+/// How far above the main track (in its own heights) a clip dragged from it has to be taken
+/// before it leaves it for an overlay track: half the track's height.
+pub const MAIN_LEAVE_SHARE: f32 = 0.5;
+
+/// The track a clip being moved is over. A clip from the main track stays on it until the
+/// pointer is clearly above it (`MAIN_LEAVE_SHARE`), so a little upward drift while sliding it
+/// along still inserts it between the main clips instead of putting it on a track above.
+fn move_target(rows: &[Row], y: f32, from_main: bool) -> Option<Row> {
+    if from_main {
+        if let Some(m) = rows.iter().find(|r| r.kind == TrackKind::Main) {
+            let leeway = m.rect.height() * MAIN_LEAVE_SHARE;
+            if y >= m.rect.top() - leeway && y <= m.rect.bottom() + leeway {
+                return Some(*m);
+            }
+        }
+    }
+    rows.iter().find(|r| r.hit_y(y)).copied()
+}
+
 /// How far into a clip a drop goes in after it rather than before it (half way).
 pub const INSERT_SIDE: f64 = 0.5;
 
@@ -875,8 +894,9 @@ impl App {
         let mut drop_line: Option<(f32, Option<Rect>)> = None;
         if let Some(item) = self.lib_drag.clone() {
             if let Some(p) = ui.ctx().pointer_interact_pos().filter(|p| area.contains(*p)) {
-                let row = rows.iter().find(|r| r.hit_y(p.y)).copied();
-                let above = rows.first().map(|r| p.y < r.rect.top() - 3.0).unwrap_or(true);
+                // over a track: that one; just above or below the main track: the main track
+                let row = rows.iter().find(|r| r.hit_y(p.y)).copied().or_else(|| move_target(&rows, p.y, true));
+                let above = row.is_none() && rows.first().map(|r| p.y < r.rect.top() - 3.0).unwrap_or(true);
                 let (t, _) = snap1(view.t(p.x).max(0.0), &self.snap_points(u64::MAX, false), thr);
                 // over an overlay or sound track with clips in the way: the line shows the join it goes in at
                 let mut line_t = t;
@@ -992,7 +1012,7 @@ impl App {
         // ghost of a main-track clip being moved, and where it would land
         if let Some(d) = self.tl_drag.as_ref().filter(|d| d.kind == DragKind::Move && d.main) {
             if let (Some(o), Some(p)) = (&d.orig, ptr) {
-                let row = rows.iter().find(|r| r.hit_y(p.y)).copied().or_else(|| rows.iter().find(|r| r.kind == TrackKind::Main).copied());
+                let row = move_target(&rows, p.y, true).or_else(|| rows.iter().find(|r| r.kind == TrackKind::Main).copied());
                 if let Some(row) = row {
                     let r = Rect::from_min_size(pos2(view.x(d.ghost), row.rect.top() + 1.0), vec2((o.duration as f32 * view.zoom).max(4.0), row.rect.height() - 2.0));
                     painter.rect_filled(r, 4.0, Color32::from_rgba_unmultiplied(239, 45, 72, 70));
@@ -1220,8 +1240,8 @@ impl App {
         let id = d.clip_id;
         let Some((ti, ci)) = self.project.find_clip(id) else { return };
         let src_kind = self.project.tracks[ti].kind;
-        let target = rows.iter().find(|r| r.hit_y(p.y)).map(|r| (r.ti, r.kind));
-        let above = rows.first().map(|r| p.y < r.rect.top() - 3.0).unwrap_or(false);
+        let target = move_target(rows, p.y, src_kind == TrackKind::Main).map(|r| (r.ti, r.kind));
+        let above = target.is_none() && rows.first().map(|r| p.y < r.rect.top() - 3.0).unwrap_or(false);
         let mut c = self.project.tracks[ti].clips[ci].clone();
         let visual = c.text.is_none() && c.media.and_then(|m| self.project.media(m)).map(|m| m.is_visual()).unwrap_or(false);
         let target_locked = target.map(|(t, _)| self.project.tracks[t].locked).unwrap_or(false);
@@ -1651,5 +1671,17 @@ mod zoom_tests {
         assert_eq!(tr.clips[0].id, 22);
         assert_eq!(tr.clips[1].start, 1.0);
         assert!(tr.clips.windows(2).all(|w| w[0].end() <= w[1].start + 1e-9));
+    }
+
+    #[test]
+    fn a_main_clip_stays_on_the_main_track_while_slid_along() {
+        let row = |ti, kind, top: f32, h: f32| Row { ti, kind, rect: Rect::from_min_max(pos2(0.0, top), pos2(100.0, top + h)) };
+        let rows = [row(1, TrackKind::Overlay, 0.0, 40.0), row(0, TrackKind::Main, 44.0, 60.0)];
+        // 20 px above the main track (a third of its height): still the main track
+        assert_eq!(move_target(&rows, 24.0, true).map(|r| r.ti), Some(0));
+        // clearly up on the overlay track: that one
+        assert_eq!(move_target(&rows, 5.0, true).map(|r| r.ti), Some(1));
+        // a clip from another track goes by where the pointer is
+        assert_eq!(move_target(&rows, 24.0, false).map(|r| r.ti), Some(1));
     }
 }
