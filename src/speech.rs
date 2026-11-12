@@ -24,6 +24,8 @@ pub struct Sentence {
     pub end: f64,
     pub text: String,
     pub words: Vec<[i32; 2]>,
+    /// Each word's text, beside its time.
+    pub word_texts: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -288,8 +290,13 @@ fn run(mut p: Project, pcm: &HashMap<u64, Arc<Vec<i16>>>, o: &Options, st: &Arc<
         }
     }
     let bytes = std::fs::read(out.with_extension("json")).map_err(|e| format!("The speech engine gave no answer: {e}"))?;
+    let pcm = read_wav(&wav);
     let _ = std::fs::remove_dir_all(&dir);
-    Ok(parse(&bytes))
+    let mut s = parse(&bytes);
+    if let Some(pcm) = pcm {
+        refine(&mut s, &pcm);
+    }
+    Ok(s)
 }
 
 /// The engine writes its text bytes as they are, so a token can hold half a Thai letter. Read
@@ -314,60 +321,191 @@ fn ms(v: &serde_json::Value, k: &str) -> i64 {
 
 /// Sentences from the engine's full JSON answer. Like buildFragmentInfosFromSentences
 /// (videoeditor.dll FUN_182c12ef0), a sentence with no text or whose end isn't after its start is
-/// left out; each word keeps its start and end in whole ms from the sentence start.
+/// left out; each word keeps its start and end in whole ms from the sentence start, and its text
+/// (RecognizedSubtitleWord keeps both).
+///
+/// The text is the engine's pieces put together as it wrote them. Its words are found the way
+/// the caption's own words are (`words::split`: at spaces, Thai by its dictionary), and each one
+/// is timed from the pieces its letters came in: a piece's time is shared over its bytes, so a
+/// Thai word that began halfway through a piece starts halfway through its time.
 pub fn parse(bytes: &[u8]) -> Vec<Sentence> {
     let text: String = bytes.iter().map(|&b| b as char).collect();
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return vec![] };
     let mut out = vec![];
     for seg in v.get("transcription").and_then(|t| t.as_array()).into_iter().flatten() {
         let (from, to) = (ms(seg, "from"), ms(seg, "to"));
-        let mut words: Vec<(Vec<u8>, i64, i64)> = vec![];
+        if to <= from {
+            continue;
+        }
+        // every byte of the text with the time it was heard from..to
+        let mut text: Vec<u8> = vec![];
+        let mut at: Vec<(i64, i64)> = vec![];
         for tok in seg.get("tokens").and_then(|t| t.as_array()).into_iter().flatten() {
             let t = raw(tok.get("text").and_then(|x| x.as_str()).unwrap_or(""));
             if t.starts_with(b"[_") || t.starts_with(b"<|") || t.is_empty() {
                 continue;
             }
-            let (a, b) = (ms(tok, "from"), ms(tok, "to"));
-            let new_word = t[0] == b' ' || words.is_empty();
-            if new_word {
-                words.push((vec![], a, b));
+            let (a, b) = (ms(tok, "from"), ms(tok, "to").max(ms(tok, "from")));
+            // the space a piece starts with takes no time
+            let sp = t.iter().take_while(|&&c| c == b' ').count();
+            let n = (t.len() - sp).max(1) as i64;
+            for (i, &byte) in t.iter().enumerate() {
+                text.push(byte);
+                if i < sp {
+                    at.push((a, a));
+                } else {
+                    let i = (i - sp) as i64;
+                    at.push((a + (b - a) * i / n, a + (b - a) * (i + 1) / n));
+                }
             }
-            let w = words.last_mut().unwrap();
-            w.0.extend_from_slice(&t);
-            w.2 = w.2.max(b);
         }
-        let mut list: Vec<(String, i64, i64)> = words
-            .into_iter()
-            .map(|(b, a, e)| (String::from_utf8_lossy(&b).trim().to_string(), a, e))
-            .filter(|(s, _, _)| !s.is_empty())
-            .collect();
-        let seg_text = String::from_utf8_lossy(&raw(seg.get("text").and_then(|x| x.as_str()).unwrap_or(""))).trim().to_string();
-        if list.is_empty() && !seg_text.is_empty() {
-            list.push((seg_text.clone(), from, to));
+        if text.is_empty() {
+            text = raw(seg.get("text").and_then(|x| x.as_str()).unwrap_or(""));
+            let n = text.len().max(1) as i64;
+            at = (0..text.len() as i64).map(|i| (from + (to - from) * i / n, from + (to - from) * (i + 1) / n)).collect();
         }
-        let content = list.iter().map(|w| w.0.as_str()).collect::<Vec<_>>().join(" ");
-        if content.trim().is_empty() || to <= from {
+        // each character's time, from its bytes
+        let decoded = String::from_utf8_lossy(&text).to_string();
+        let mut char_at: Vec<(i64, i64)> = vec![];
+        if std::str::from_utf8(&text).is_ok() {
+            for (bi, c) in decoded.char_indices() {
+                let e = (bi + c.len_utf8()).min(at.len()) - 1;
+                char_at.push((at[bi].0, at[e].1));
+            }
+        } else {
+            // broken bytes were replaced: share the time out by position instead
+            let n = decoded.chars().count().max(1) as i64;
+            char_at = (0..n).map(|i| (from + (to - from) * i / n, from + (to - from) * (i + 1) / n)).collect();
+        }
+        let lead = decoded.chars().take_while(|c| c.is_whitespace()).count();
+        let content = decoded.trim().to_string();
+        if content.is_empty() {
             continue;
         }
+        let chars: Vec<char> = content.chars().collect();
         let len = (to - from) as i32;
         let mut last = 0;
-        let mut times: Vec<[i32; 2]> = list
-            .iter()
-            .map(|(_, a, e)| {
-                let t0 = ((*a - from) as i32).clamp(last, len);
-                let t1 = ((*e - from) as i32).clamp(t0, len);
-                last = t0;
-                [t0, t1]
-            })
-            .collect();
-        // a word stays the one being said until the next one starts
-        for i in 0..times.len() {
-            let next = times.get(i + 1).map(|t| t[0]).unwrap_or(len);
-            times[i][1] = times[i][1].max(next);
+        let mut word_texts = vec![];
+        let mut times: Vec<[i32; 2]> = vec![];
+        for (a, b) in crate::words::split(&content) {
+            let (s, e) = (char_at[lead + a].0, char_at[lead + b - 1].1);
+            let t0 = ((s - from) as i32).clamp(last, len);
+            let t1 = ((e - from) as i32).clamp(t0, len);
+            last = t0;
+            times.push([t0, t1]);
+            word_texts.push(chars[a..b].iter().collect::<String>());
         }
-        out.push(Sentence { start: from as f64 / 1000.0, end: to as f64 / 1000.0, text: content, words: times });
+        stay_until_next(&mut times, len);
+        out.push(Sentence { start: from as f64 / 1000.0, end: to as f64 / 1000.0, text: content, words: times, word_texts });
     }
     out
+}
+
+/// A word stays the one being said until the next one starts.
+fn stay_until_next(times: &mut [[i32; 2]], len: i32) {
+    for i in 0..times.len() {
+        let next = times.get(i + 1).map(|t| t[0]).unwrap_or(len);
+        times[i][1] = times[i][1].max(next);
+    }
+}
+
+/// Audio is looked at in steps of this many ms to find the pauses between words.
+pub const PAUSE_STEP_MS: i64 = 10;
+/// A quiet stretch at least this long is a pause (CutStudio's own, estimated).
+pub const PAUSE_MIN_MS: i64 = 80;
+/// Quiet means below this share of the loud end of the speech (the 95th percentile of the
+/// steps' peaks), and never above `QUIET_FLOOR` alone (estimated).
+pub const QUIET_SHARE: f64 = 0.08;
+pub const QUIET_FLOOR: i32 = 300;
+/// A pause that begins this soon after a word's guessed start comes before the word
+/// (estimated: in a spoken test the engine's starts were up to 40 ms before a pause, and a
+/// real short word before a pause lasted 80 ms).
+pub const PAUSE_LOOK_MS: i64 = 50;
+/// The shortest time a word is shown after the one before it (estimated).
+pub const WORD_MIN_MS: i32 = 60;
+
+/// The engine's word times are often early: across a pause it starts the next word where the
+/// last one ended. Where a word's start falls in a pause in the sound, it moves to where the
+/// speaking starts again. `pcm` is the 16 kHz mono sound the engine heard.
+pub fn refine(sentences: &mut [Sentence], pcm: &[i16]) {
+    let step = (SPEECH_RATE as i64 * PAUSE_STEP_MS / 1000) as usize;
+    if pcm.len() < step {
+        return;
+    }
+    let peaks: Vec<i32> = pcm.chunks(step).map(|c| c.iter().map(|&x| (x as i32).abs()).max().unwrap_or(0)).collect();
+    let mut sorted = peaks.clone();
+    sorted.sort_unstable();
+    let loud = sorted[(sorted.len() * 95 / 100).min(sorted.len() - 1)];
+    let quiet = ((loud as f64 * QUIET_SHARE) as i32).max(QUIET_FLOOR);
+    let silent = |k: i64| k >= 0 && (k as usize) < peaks.len() && peaks[k as usize] < quiet;
+    let min_steps = PAUSE_MIN_MS / PAUSE_STEP_MS;
+    for s in sentences.iter_mut() {
+        let base = (s.start * 1000.0).round() as i64;
+        let len = ((s.end - s.start) * 1000.0).round() as i32;
+        let mut last: Option<i32> = None;
+        for w in s.words.iter_mut() {
+            let mut t0 = w[0];
+            if let Some(l) = last {
+                t0 = t0.max(l);
+            }
+            // a pause the word's start is in, or that begins just after it
+            let k0 = (base + t0 as i64) / PAUSE_STEP_MS;
+            for k in k0..=k0 + PAUSE_LOOK_MS / PAUSE_STEP_MS {
+                if !silent(k) {
+                    continue;
+                }
+                let (mut a, mut b) = (k, k);
+                while silent(a - 1) {
+                    a -= 1;
+                }
+                while silent(b + 1) {
+                    b += 1;
+                }
+                if b - a + 1 >= min_steps {
+                    let speaks = ((b + 1) * PAUSE_STEP_MS - base) as i32;
+                    if speaks < len {
+                        t0 = t0.max(speaks);
+                    }
+                    break;
+                }
+            }
+            if let Some(l) = last {
+                if t0 < l + WORD_MIN_MS {
+                    t0 = (l + WORD_MIN_MS).min(len);
+                }
+            }
+            w[0] = t0.min(len);
+            w[1] = w[1].max(w[0]);
+            last = Some(w[0]);
+        }
+        // the word before ends where the next one now starts
+        for i in 0..s.words.len() {
+            if let Some(n) = s.words.get(i + 1).map(|t| t[0]) {
+                s.words[i][1] = n.max(s.words[i][0]);
+            }
+        }
+        stay_until_next(&mut s.words, len);
+    }
+}
+
+/// The samples of a 16-bit mono WAV file.
+fn read_wav(path: &Path) -> Option<Vec<i16>> {
+    let b = std::fs::read(path).ok()?;
+    if b.len() < 12 || &b[0..4] != b"RIFF" || &b[8..12] != b"WAVE" {
+        return None;
+    }
+    let mut i = 12;
+    while i + 8 <= b.len() {
+        let id = &b[i..i + 4];
+        let n = u32::from_le_bytes([b[i + 4], b[i + 5], b[i + 6], b[i + 7]]) as usize;
+        let body = i + 8;
+        if id == b"data" {
+            let end = (body + n).min(b.len());
+            return Some(b[body..end].chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect());
+        }
+        i = body + n + (n & 1);
+    }
+    None
 }
 
 #[cfg(test)]
@@ -379,10 +517,17 @@ mod tests {
     #[ignore]
     fn reads_a_real_engine_answer() {
         let p = std::env::var("SPEECH_JSON").expect("SPEECH_JSON");
-        let s = parse(&std::fs::read(p).unwrap());
+        let mut s = parse(&std::fs::read(p).unwrap());
+        // SPEECH_WAV=<the 16 kHz sound it heard> also moves word starts past pauses
+        if let Ok(w) = std::env::var("SPEECH_WAV") {
+            refine(&mut s, &read_wav(Path::new(&w)).unwrap());
+        }
         for x in &s {
-            println!("{:.2}-{:.2} {:?} {:?}", x.start, x.end, x.text, x.words);
-            assert_eq!(x.text.split_whitespace().count(), x.words.len());
+            println!("{:.2}-{:.2} {:?}", x.start, x.end, x.text);
+            for (w, t) in x.word_texts.iter().zip(&x.words) {
+                println!("    {:>6.2} {:>6.2} {w}", x.start + t[0] as f64 / 1000.0, x.start + t[1] as f64 / 1000.0);
+            }
+            assert_eq!(x.word_texts.len(), x.words.len());
         }
         assert!(!s.is_empty());
     }
@@ -437,5 +582,41 @@ mod tests {
         assert_eq!(s[0].text, "สวัสดี world");
         assert_eq!((s[0].start, s[0].end), (1.0, 2.5));
         assert_eq!(s[0].words, vec![[0, 800], [800, 1500]], "the last word lasts to the sentence end");
+        assert_eq!(s[0].word_texts, vec!["สวัสดี", "world"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn thai_speech_is_timed_word_by_word() {
+        // the engine writes Thai without spaces, in pieces that don't follow the words
+        let j = r#"{"transcription":[{"offsets":{"from":0,"to":2000},"text":"x","tokens":[{"text":" สวัสดีคร","offsets":{"from":0,"to":800}},{"text":"ับวันนี้","offsets":{"from":800,"to":1400}},{"text":"อากาศดี","offsets":{"from":1400,"to":2000}}]}]}"#;
+        let s = parse(j.as_bytes());
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].text, "สวัสดีครับวันนี้อากาศดี", "no spaces put in");
+        let w = &s[0].word_texts;
+        assert!(w.len() >= 4, "{w:?}");
+        assert_eq!(w[0], "สวัสดี");
+        assert_eq!(w[1], "ครับ");
+        let t = &s[0].words;
+        // ครับ began two letters before the end of the first piece
+        assert!(t[1][0] > 500 && t[1][0] < 800, "{t:?}");
+        assert!(t.windows(2).all(|p| p[0][0] < p[1][0]), "{t:?}");
+    }
+
+    #[test]
+    fn word_starts_move_past_pauses_in_the_sound() {
+        // speech 0-1 s, quiet 1-1.6 s, speech 1.6-3 s
+        let r = SPEECH_RATE as usize;
+        let mut pcm = vec![0i16; 3 * r];
+        for (i, x) in pcm.iter_mut().enumerate() {
+            let t = i as f64 / r as f64;
+            if t < 1.0 || t >= 1.6 {
+                *x = ((t * 1400.0).sin() * 8000.0) as i16;
+            }
+        }
+        let mut s = vec![Sentence { start: 0.0, end: 3.0, text: "one two".into(), words: vec![[0, 1100], [1100, 3000]], word_texts: vec!["one".into(), "two".into()] }];
+        refine(&mut s, &pcm);
+        assert_eq!(s[0].words[1][0], 1600, "two starts when it's said");
+        assert_eq!(s[0].words[0], [0, 1600]);
     }
 }

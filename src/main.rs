@@ -21,6 +21,7 @@ mod thai;
 mod theme;
 mod timeline;
 mod winsound;
+mod words;
 
 use std::path::PathBuf;
 

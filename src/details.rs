@@ -991,12 +991,12 @@ impl App {
                 color_row(ui, "Highlight", &mut s.word_color);
             }
             if s.word_mode != WordMode::All {
-                let n = word_spans(&s.content, dur).len();
+                let n = s.spans(dur).len();
                 let each = if n > 0 { dur / n as f64 } else { 0.0 };
-                if n > 0 && n == s.word_times.len() {
-                    ui.label(RichText::new(format!("{n} words, timed to when each one is said (from Auto captions).")).color(MUTED).size(11.0));
+                if s.heard() || (n > 0 && n == s.word_times.len()) {
+                    ui.label(RichText::new(format!("{n} words, timed to when each one is said (from Auto captions). Words you edit keep the time of the words they replace.")).color(MUTED).size(11.0));
                 } else {
-                    ui.label(RichText::new(format!("{n} words, about {each:.2} s each. Longer words stay a little longer. Words are split at spaces: for Thai, type a space between words.")).color(MUTED).size(11.0));
+                    ui.label(RichText::new(format!("{n} words, about {each:.2} s each. Longer words stay a little longer. Thai words are found by themselves, no spaces needed.")).color(MUTED).size(11.0));
                 }
             }
             heading(ui, "Outline");

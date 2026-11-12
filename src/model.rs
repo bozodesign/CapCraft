@@ -980,9 +980,15 @@ pub struct WordSpan {
     pub t1_ms: i32,
 }
 
-/// Split a text at spaces and line breaks and give each word a share of `dur` seconds by its
-/// number of letters (no speech timing is known, so this is an estimate; MECHANICS.md).
+/// Split a text into words (at spaces and line breaks; Thai by its dictionary, `words::split`)
+/// and give each word a share of `dur` seconds by its number of letters (no speech timing is
+/// known, so this is an estimate; MECHANICS.md).
 pub fn word_spans(content: &str, dur: f64) -> Vec<WordSpan> {
+    share_by_letters(crate::words::split(content), dur)
+}
+
+/// Words parted at spaces only, as captions made before Thai was split were timed.
+fn spaced_words(content: &str) -> Vec<(usize, usize)> {
     let chars: Vec<char> = content.chars().collect();
     let mut words = vec![];
     let mut i = 0;
@@ -997,6 +1003,10 @@ pub fn word_spans(content: &str, dur: f64) -> Vec<WordSpan> {
         }
         words.push((s, i));
     }
+    words
+}
+
+fn share_by_letters(words: Vec<(usize, usize)>, dur: f64) -> Vec<WordSpan> {
     let letters: usize = words.iter().map(|(a, b)| b - a).sum();
     let total_ms = (dur * 1000.0).round().max(1.0) as i64;
     let mut out = vec![];
@@ -1090,10 +1100,15 @@ pub struct TextStyle {
     pub word_mode: WordMode,
     #[serde(default = "word_highlight_default")]
     pub word_color: [u8; 4],
-    /// Heard times of the words (ms from the clip start, one [start, end] per word split at
-    /// spaces), from automatic captions; used while the words still match.
+    /// Heard times of the words (ms from the clip start, one [start, end] per word), from
+    /// automatic captions.
     #[serde(default)]
     pub word_times: Vec<[i32; 2]>,
+    /// The heard words themselves, beside their times (the original's RecognizedSubtitleWord
+    /// keeps both): when the text is edited, the words still there keep their times
+    /// (`words::rematch`).
+    #[serde(default)]
+    pub word_texts: Vec<String>,
     /// Letter case shown (Tt, TT, tt); the typed text is kept as it is.
     #[serde(default)]
     pub case: TextCase,
@@ -1128,6 +1143,7 @@ impl TextStyle {
             word_mode: WordMode::All,
             word_color: WORD_HIGHLIGHT_DEFAULT,
             word_times: vec![],
+            word_texts: vec![],
             case: TextCase::None,
         }
     }
@@ -1135,25 +1151,41 @@ impl TextStyle {
     pub fn shown(&self) -> String {
         self.case.apply(&self.content)
     }
-    /// Each word's time: the heard times when there's one per word, otherwise shared out by letters.
+    /// Each word's time: the heard times (kept through edits as the original keeps them), or
+    /// for typed text a share by letters.
     pub fn spans(&self, dur: f64) -> Vec<WordSpan> {
-        let mut w = word_spans(&self.content, dur);
-        if w.len() == self.word_times.len() {
+        if self.heard() {
+            return crate::words::rematch(&self.word_texts, &self.word_times, &self.content)
+                .into_iter()
+                .map(|(start, end, t)| WordSpan { start, end, t0_ms: t[0], t1_ms: t[1] })
+                .collect();
+        }
+        // captions heard before the words were kept: their times fit the words parted at spaces
+        let spaced = spaced_words(&self.content);
+        if !self.word_times.is_empty() && spaced.len() == self.word_times.len() {
+            let mut w = share_by_letters(spaced, dur);
             for (s, t) in w.iter_mut().zip(&self.word_times) {
                 s.t0_ms = t[0];
                 s.t1_ms = t[1].max(t[0]);
             }
+            return w;
         }
-        w
+        word_spans(&self.content, dur)
+    }
+    /// Whether the words carry the times they were heard at.
+    pub fn heard(&self) -> bool {
+        !self.word_texts.is_empty() && self.word_texts.len() == self.word_times.len()
     }
     /// Copy the look (not the words or kind) from another style.
     pub fn copy_look(&mut self, o: &TextStyle) {
         let content = std::mem::take(&mut self.content);
         let times = std::mem::take(&mut self.word_times);
+        let texts = std::mem::take(&mut self.word_texts);
         let kind = self.kind;
         *self = o.clone();
         self.content = content;
         self.word_times = times;
+        self.word_texts = texts;
         self.kind = kind;
     }
 }

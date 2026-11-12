@@ -1246,6 +1246,11 @@ impl App {
         b.fade_out = b.fade_out.min(fade_limit(b.duration));
         if let Some(ts) = &mut b.text {
             ts.anim_in = TextAnim::None;
+            // heard word times count from the clip's start, so the second part's move with it
+            let ms = (cut * 1000.0).round() as i32;
+            for w in ts.word_times.iter_mut() {
+                *w = [w[0] - ms, w[1] - ms];
+            }
         }
         if let Some(ts) = &mut a.text {
             ts.anim_out = TextAnim::None;
@@ -1600,16 +1605,16 @@ impl App {
         }
         let n = cues.len();
         let share = self.project.captions_share_style;
-        self.add_captions(cues.into_iter().map(|c| (c.start, c.end, c.text, vec![])).collect(), share);
+        self.add_captions(cues.into_iter().map(|c| (c.start, c.end, c.text, vec![], vec![])).collect(), share);
         self.notify(format!("{n} captions added"));
     }
 
     /// Put captions on the timeline. New ones take the default caption look for the canvas
     /// (FUN_182c15c60), or the first existing caption's look when `reuse_look` is set, as the
     /// original's speech captions do ("reuse style from first seg").
-    fn add_captions(&mut self, cues: Vec<(f64, f64, String, Vec<[i32; 2]>)>, reuse_look: bool) {
+    fn add_captions(&mut self, cues: Vec<(f64, f64, String, Vec<[i32; 2]>, Vec<String>)>, reuse_look: bool) {
         let look = self.project.captions().first().map(|&(ti, ci)| self.project.tracks[ti].clips[ci].clone());
-        for (start, end, text, times) in cues {
+        for (start, end, text, times, texts) in cues {
             let id = self.project.new_id();
             let mut clip = Clip::new(id, None, start, end - start);
             let (size, y) = caption_defaults(self.project.width, self.project.height);
@@ -1617,6 +1622,7 @@ impl App {
             let mut st = TextStyle::new(&text, TextKind::Caption);
             st.size = size;
             st.word_times = times;
+            st.word_texts = texts;
             if let (true, Some(o)) = (reuse_look, &look) {
                 st.copy_look(o.text.as_ref().unwrap());
                 clip.transform = o.transform;
@@ -1669,7 +1675,7 @@ impl App {
             Ok(s) if s.is_empty() => self.notify("No speech was heard"),
             Ok(s) => {
                 let n = s.len();
-                self.add_captions(s.into_iter().map(|x| (x.start, x.end, x.text, x.words)).collect(), true);
+                self.add_captions(s.into_iter().map(|x| (x.start, x.end, x.text, x.words, x.word_texts)).collect(), true);
                 self.notify(format!("{n} captions added from speech"));
             }
             Err(e) if e == "Stopped" => self.notify("Auto captions stopped"),
