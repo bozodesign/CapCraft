@@ -14,5 +14,7 @@
 /MECHANICS.md
 /mechanics.json
 
+/upload-to-github.cmd
+
 *.log
 *.tmp
