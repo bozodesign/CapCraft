@@ -106,6 +106,8 @@ pub struct App {
     /// The time under the mouse while it is over the timeline (the original's preview axis):
     /// the player shows that frame while not playing.
     pub tl_hover_t: Option<f64>,
+    /// Clips copied with Ctrl+C: each with the kind and id of the track it was on.
+    pub clip_copy: Vec<(TrackKind, u64, Clip)>,
     pub timeline_rect: Rect,
     pub preview_rect: Rect,
 
@@ -182,6 +184,8 @@ struct PreviewSources<'a> {
 
 /// How far ahead of the playhead the player starts the decoders of the clips coming up.
 pub const PREROLL_SECONDS: f64 = 1.5;
+/// Text put on the system clipboard when clips are copied, so Ctrl+V comes back to the app.
+pub const COPY_MARK: &str = "CapCraft clips";
 
 /// Where a clip goes in on the main track for a time: counted on the track as it closes up
 /// without the clip being moved (`skip`), so it matches the gap shown while dragging. Past the
@@ -361,6 +365,7 @@ impl App {
             tl_drag: None,
             lib_drag: None,
             tl_hover_t: None,
+            clip_copy: vec![],
             timeline_rect: Rect::NOTHING,
             preview_rect: Rect::NOTHING,
             thumbs: HashMap::new(),
@@ -1292,6 +1297,81 @@ impl App {
         }
     }
 
+    /// Ctrl+C: remember the picked clips (or the selected one) to paste later.
+    pub fn copy_selected(&mut self, ctx: &egui::Context) {
+        let mut v = vec![];
+        for id in self.group() {
+            if let Some((ti, ci)) = self.project.find_clip(id) {
+                let t = &self.project.tracks[ti];
+                v.push((t.kind, t.id, t.clips[ci].clone()));
+            }
+        }
+        if v.is_empty() {
+            return;
+        }
+        let n = v.len();
+        self.clip_copy = v;
+        // something on the system clipboard, so Ctrl+V reaches the app
+        ctx.copy_text(format!("{COPY_MARK} {n}"));
+        self.notify(if n == 1 { "Clip copied".to_string() } else { format!("{n} clips copied") });
+    }
+
+    /// Ctrl+V: put the copied clips in at the playhead, keeping the times between them.
+    /// Main-track clips go in on the main track at the place the playhead is, in their order;
+    /// the others go back on the track they came from when they fit there, otherwise together
+    /// on one free track of their kind.
+    pub fn paste_at_playhead(&mut self) {
+        if self.clip_copy.is_empty() {
+            return;
+        }
+        let t0 = self.playhead;
+        let s0 = self.clip_copy.iter().map(|(_, _, c)| c.start).fold(f64::INFINITY, f64::min);
+        let mut new_ids = vec![];
+        let mut main_clips = vec![];
+        let mut by_track: Vec<(TrackKind, u64, Vec<Clip>)> = vec![];
+        let copy = self.clip_copy.clone();
+        for (kind, tid, c) in copy {
+            let mut n = c.clone();
+            n.id = self.project.new_id();
+            new_ids.push(n.id);
+            if kind == TrackKind::Main {
+                n.transition = None;
+                main_clips.push(n);
+                continue;
+            }
+            n.start = (t0 + (c.start - s0)).max(0.0);
+            match by_track.iter_mut().find(|(k, t, _)| *k == kind && *t == tid) {
+                Some((_, _, v)) => v.push(n),
+                None => by_track.push((kind, tid, vec![n])),
+            }
+        }
+        if !main_clips.is_empty() {
+            let mi = self.project.main_index();
+            if self.project.tracks[mi].locked {
+                self.notify("The main track is locked");
+                new_ids.retain(|id| !main_clips.iter().any(|c| c.id == *id));
+            } else {
+                main_clips.sort_by(|a, b| a.start.total_cmp(&b.start));
+                let idx = self.main_insert_index(t0, None).min(self.project.tracks[mi].clips.len());
+                self.project.tracks[mi].clips.splice(idx..idx, main_clips);
+            }
+        }
+        for (kind, tid, clips) in by_track {
+            let home = self.project.tracks.iter().position(|t| t.id == tid && t.kind == kind && !t.locked);
+            let fits = home.map(|ti| clips.iter().all(|c| self.project.tracks[ti].clips.iter().all(|o| !crate::model::overlaps(c, o)))).unwrap_or(false);
+            match home {
+                Some(ti) if fits => {
+                    let t = &mut self.project.tracks[ti];
+                    t.clips.extend(clips);
+                    t.clips.sort_by(|a, b| a.start.total_cmp(&b.start));
+                }
+                _ => self.project.place_free_together(kind, clips),
+            }
+        }
+        self.project.relayout();
+        self.pick(new_ids);
+    }
+
     pub fn duplicate_selected(&mut self) {
         let Selection::Clip(id) = self.selection else { return };
         let Some((ti, ci)) = self.project.find_clip(id) else { return };
@@ -1941,6 +2021,8 @@ impl App {
                     ("Ctrl+A", "Pick every clip"),
                     ("Esc", "Pick nothing"),
                     ("Ctrl+D", "Duplicate"),
+                    ("Ctrl+C", "Copy the picked clips"),
+                    ("Ctrl+V", "Paste them at the playhead"),
                     ("Ctrl+Z", "Undo"),
                     ("Ctrl+Shift+Z / Ctrl+Y", "Redo"),
                     ("← / →", "One frame back / forward"),
@@ -1994,9 +2076,17 @@ impl App {
                 i.key_pressed(Key::Escape),
                 c && (i.key_pressed(Key::Equals) || i.key_pressed(Key::Plus)),
                 c && i.key_pressed(Key::Minus),
+                (c && i.key_pressed(Key::C)) || i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
+                (c && i.key_pressed(Key::V)) || i.events.iter().any(|e| matches!(e, egui::Event::Paste(t) if t.starts_with(COPY_MARK))),
             ]
         });
-        let [space, split, del, undo, redo, dup, left, right, shift, home, end, imp, save, exp, key, text, all, esc, zin, zout] = keys;
+        let [space, split, del, undo, redo, dup, left, right, shift, home, end, imp, save, exp, key, text, all, esc, zin, zout, copy, paste] = keys;
+        if copy {
+            self.copy_selected(ctx);
+        }
+        if paste {
+            self.paste_at_playhead();
+        }
         // timeline zoom in / out: twice as close or twice as far (the original's zoom steps)
         if zin {
             self.zoom_keep_playhead(self.tl_zoom * crate::timeline::ZOOM_STEP);

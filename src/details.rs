@@ -173,6 +173,14 @@ fn round_to(v: f32, decimals: i32) -> f32 {
     (v * p).round() / p
 }
 
+/// Volume points in Audio details (the person's request: finer than dragging them on the
+/// timeline). Two points keep this far apart (seconds), as when they are dragged there.
+const VOL_POINT_GAP: f64 = 0.01;
+/// How much a point's time changes per pixel its number is dragged (seconds).
+const VOL_POINT_TIME_DRAG: f64 = 0.01;
+/// How much a point's level changes per pixel its number is dragged (dB).
+const VOL_POINT_DB_DRAG: f64 = 0.1;
+
 /// The small diamond beside the volume slider: filled when the playhead is on a volume point.
 fn point_button(ui: &mut egui::Ui, on: bool, enabled: bool) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), if enabled { egui::Sense::click() } else { egui::Sense::hover() });
@@ -644,13 +652,54 @@ impl App {
             }
             ui.label(RichText::new(db_text(c.volume)).color(MUTED));
         });
+        let mut go_to: Option<f64> = None;
         if !c.vol_points.is_empty() {
+            heading(ui, "Volume points");
             ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("{} volume points", c.vol_points.len())).color(MUTED).size(11.5));
+                ui.label(RichText::new(format!("{} points. Drag a number, or click it to type.", c.vol_points.len())).color(MUTED).size(11.5));
                 if ui.small_button("🗑").on_hover_text("Clear all volume points").clicked() {
                     c.vol_points.clear();
                 }
             });
+            let mut remove = None;
+            let n = c.vol_points.len();
+            let (start, dur, vol) = (c.start, c.duration, c.volume);
+            for i in 0..n {
+                let lo = if i > 0 { c.vol_points[i - 1].t + VOL_POINT_GAP } else { 0.0 };
+                let hi = if i + 1 < n { c.vol_points[i + 1].t - VOL_POINT_GAP } else { dur };
+                ui.horizontal(|ui| {
+                    ui.add_sized([22.0, 20.0], egui::Label::new(RichText::new(format!("{}", i + 1)).color(MUTED)));
+                    // when in the clip, in seconds from its start
+                    let mut t = c.vol_points[i].t;
+                    let r = ui.add(egui::DragValue::new(&mut t).range(lo.min(hi)..=hi.max(lo)).speed(VOL_POINT_TIME_DRAG).fixed_decimals(2).suffix(" s"));
+                    r.on_hover_text("When, in seconds from the clip's start");
+                    if (t - c.vol_points[i].t).abs() > 1e-9 {
+                        c.vol_points[i].t = t.clamp(lo.min(hi), hi.max(lo));
+                    }
+                    // its level in dB (-60 dB is silent)
+                    let level = vol * c.vol_points[i].g;
+                    let db0 = gain_to_db(level).max(VOL_DB_MIN);
+                    let mut db = db0;
+                    let r = ui.add(egui::DragValue::new(&mut db).range(VOL_DB_MIN..=VOL_DB_MAX).speed(VOL_POINT_DB_DRAG).fixed_decimals(1).suffix(" dB"));
+                    r.on_hover_text("Level, in dB (-60 dB is silent)");
+                    if (db - db0).abs() > 1e-4 && vol > 0.001 {
+                        let g = if db <= VOL_DB_MIN { 0.0 } else { db_to_gain(db) };
+                        c.vol_points[i].g = (g / vol).clamp(0.0, VOL_POINT_MAX);
+                    }
+                    if ui.small_button("⏵").on_hover_text("Move the playhead to this point").clicked() {
+                        go_to = Some(start + c.vol_points[i].t);
+                    }
+                    if ui.small_button("✖").on_hover_text("Remove this point").clicked() {
+                        remove = Some(i);
+                    }
+                });
+            }
+            if let Some(i) = remove {
+                c.vol_points.remove(i);
+            }
+            if vol <= 0.001 {
+                ui.label(RichText::new("Unmute the clip to change the points' levels.").color(MUTED).size(11.5));
+            }
         }
         heading(ui, "Fades");
         slider(ui, "Fade in", &mut c.fade_in, 0.0..=fade_limit(dur as f64), 0.0, " s", 1.0);
@@ -664,6 +713,9 @@ impl App {
         }
         if separate {
             self.separate_audio();
+        }
+        if let Some(t) = go_to {
+            self.seek(t);
         }
     }
 
