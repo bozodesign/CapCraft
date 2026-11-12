@@ -2373,8 +2373,8 @@ impl App {
                 }
             }
             // CUTSTUDIO_SHOT_GRADE=<look number>: the first video clip graded with that film look,
-            // its Color tab open (a self-check)
-            if self.frame_no == 5 {
+            // its Color tab open (a self-check); after an import settles, so the import doesn't reset it
+            if self.frame_no == 40 {
                 if let Some(n) = std::env::var("CUTSTUDIO_SHOT_GRADE").ok().and_then(|v| v.parse::<usize>().ok()) {
                     let id = self.project.tracks.iter().flat_map(|t| t.clips.iter()).find(|c| c.text.is_none() && c.media.is_some()).map(|c| c.id);
                     if let (Some(id), Some(&look)) = (id, FilmLook::ALL.get(n)) {
