@@ -15,6 +15,66 @@ pub const TEXT_ANIM_LEN: f32 = 0.5;
 pub const CAPTION_SIZE_DEFAULT: f32 = 15.0;
 pub const CAPTION_PX_DIVISOR: f32 = 180.0;
 pub const CAPTION_STROKE_W: f32 = 0.06;
+
+// The original's text panel (FunctionPanel QML, the text "basic" style page): what each control
+// shows, its range and what Reset puts back. MECHANICS.md, "Text options".
+pub const TEXT_SIZE_MIN: f32 = 5.0;
+pub const TEXT_SIZE_MAX: f32 = 300.0;
+pub const TEXT_SPACING_MIN: f32 = -10.0;
+pub const TEXT_SPACING_MAX: f32 = 100.0;
+/// The outline thickness shown is the stored width × 500 (acceptBorderWidth(v / 500)).
+pub const TEXT_STROKE_SHOWN: f32 = 500.0;
+pub const TEXT_STROKE_MAX: f32 = 100.0;
+pub const TEXT_STROKE_RESET: f32 = 40.0;
+pub const TEXT_OPACITY_RESET: f32 = 100.0;
+pub const TEXT_BG_ALPHA_RESET: f32 = 100.0;
+pub const TEXT_BG_SIZE_RESET: f32 = 14.0;
+pub const TEXT_BG_OFFSET_RESET: f32 = 50.0;
+/// Corner of a background that hugs each line (FrameWrappingType.Wrap); a square one has none.
+pub const TEXT_BG_WRAP_ROUND: f32 = 30.0;
+pub const TEXT_SHADOW_ALPHA_RESET: f32 = 90.0;
+pub const TEXT_SHADOW_BLUR_RESET: f32 = 15.0;
+pub const TEXT_SHADOW_DIST_RESET: f32 = 5.0;
+pub const TEXT_SHADOW_ANGLE_RESET: f32 = -45.0;
+pub const TEXT_GLOW_MIN: f32 = 10.0;
+pub const TEXT_GLOW_ANGLE_MAX: f32 = 50.0;
+/// The original asks its glow style for these (defaultLightStrength/Range, in a packed
+/// library), so CapCraft's are estimated.
+pub const TEXT_GLOW_STRENGTH_RESET: f32 = 60.0;
+pub const TEXT_GLOW_RANGE_RESET: f32 = 50.0;
+pub const TEXT_CURVE_MAX: f32 = 360.0;
+pub const TEXT_CURVE_RESET: f32 = 72.0;
+
+fn d100() -> f32 {
+    TEXT_OPACITY_RESET
+}
+fn d_bg_size() -> f32 {
+    TEXT_BG_SIZE_RESET
+}
+fn d_bg_offset() -> f32 {
+    TEXT_BG_OFFSET_RESET
+}
+fn d_shadow_blur() -> f32 {
+    TEXT_SHADOW_BLUR_RESET
+}
+fn d_shadow_dist() -> f32 {
+    TEXT_SHADOW_DIST_RESET
+}
+fn d_shadow_angle() -> f32 {
+    TEXT_SHADOW_ANGLE_RESET
+}
+fn d_white() -> [u8; 4] {
+    [255, 255, 255, 255]
+}
+fn d_glow_strength() -> f32 {
+    TEXT_GLOW_STRENGTH_RESET
+}
+fn d_glow_range() -> f32 {
+    TEXT_GLOW_RANGE_RESET
+}
+fn d_curve() -> f32 {
+    TEXT_CURVE_RESET
+}
 /// Caption default style (write_subtitle_node makeBaseTextSegParam, 0x182c15c60):
 /// landscape canvas size 5 at y -0.73, otherwise size 11 at y -0.56.
 pub const CAPTION_SIZE_LANDSCAPE: f32 = 5.0;
@@ -1091,6 +1151,52 @@ pub struct TextStyle {
     pub shadow_color: [u8; 4],
     pub letter_spacing: f32,
     pub line_spacing: f32,
+    /// Opacity of the whole text, 0..100 as the original's panel shows it ("mix").
+    #[serde(default = "d100")]
+    pub opacity: f32,
+    /// Columns top to bottom instead of lines (the original's vertical typesetting); `align`
+    /// then means top, centre, bottom.
+    #[serde(default)]
+    pub vertical: bool,
+    /// Background: one box round the text (square) or one hugging each line (wrap).
+    #[serde(default)]
+    pub bg_wrap: bool,
+    /// Background corner, height, width and offsets, 0..100 as the panel shows them.
+    #[serde(default)]
+    pub bg_round: f32,
+    #[serde(default = "d_bg_size")]
+    pub bg_h: f32,
+    #[serde(default = "d_bg_size")]
+    pub bg_w: f32,
+    #[serde(default = "d_bg_offset")]
+    pub bg_dy: f32,
+    #[serde(default = "d_bg_offset")]
+    pub bg_dx: f32,
+    /// Shadow blur, distance (0..100) and angle (degrees).
+    #[serde(default = "d_shadow_blur")]
+    pub shadow_blur: f32,
+    #[serde(default = "d_shadow_dist")]
+    pub shadow_dist: f32,
+    #[serde(default = "d_shadow_angle")]
+    pub shadow_angle: f32,
+    /// Glow ("shine"): colour, strength and size (10..100), and where it leans (-50..50).
+    #[serde(default)]
+    pub glow: bool,
+    #[serde(default = "d_white")]
+    pub glow_color: [u8; 4],
+    #[serde(default = "d_glow_strength")]
+    pub glow_strength: f32,
+    #[serde(default = "d_glow_range")]
+    pub glow_range: f32,
+    #[serde(default)]
+    pub glow_v: f32,
+    #[serde(default)]
+    pub glow_h: f32,
+    /// Text bent along an arc of this many degrees (-360..360).
+    #[serde(default)]
+    pub curve: bool,
+    #[serde(default = "d_curve")]
+    pub curve_angle: f32,
     pub anim_in: TextAnim,
     pub anim_in_len: f32,
     pub anim_out: TextAnim,
@@ -1130,11 +1236,30 @@ impl TextStyle {
             stroke_color: [0, 0, 0, 255],
             stroke_width: CAPTION_STROKE_W,
             background: false,
-            bg_color: [0, 0, 0, 160],
+            bg_color: [0, 0, 0, 255],
             shadow: false,
-            shadow_color: [0, 0, 0, 150],
+            shadow_color: [0, 0, 0, 230],
             letter_spacing: 0.0,
             line_spacing: 0.0,
+            opacity: TEXT_OPACITY_RESET,
+            vertical: false,
+            bg_wrap: false,
+            bg_round: 0.0,
+            bg_h: TEXT_BG_SIZE_RESET,
+            bg_w: TEXT_BG_SIZE_RESET,
+            bg_dy: TEXT_BG_OFFSET_RESET,
+            bg_dx: TEXT_BG_OFFSET_RESET,
+            shadow_blur: TEXT_SHADOW_BLUR_RESET,
+            shadow_dist: TEXT_SHADOW_DIST_RESET,
+            shadow_angle: TEXT_SHADOW_ANGLE_RESET,
+            glow: false,
+            glow_color: [255, 255, 255, 255],
+            glow_strength: TEXT_GLOW_STRENGTH_RESET,
+            glow_range: TEXT_GLOW_RANGE_RESET,
+            glow_v: 0.0,
+            glow_h: 0.0,
+            curve: false,
+            curve_angle: TEXT_CURVE_RESET,
             anim_in: TextAnim::None,
             anim_in_len: TEXT_ANIM_LEN,
             anim_out: TextAnim::None,
@@ -1171,6 +1296,23 @@ impl TextStyle {
             return w;
         }
         word_spans(&self.content, dur)
+    }
+    /// The text panel's "Reset all": every text option back to the original's Reset values; the
+    /// words, their times, the font, the kind and the animations stay.
+    pub fn reset_options(&mut self) {
+        let mut f = TextStyle::new(&self.content, self.kind);
+        f.font = std::mem::take(&mut self.font);
+        f.stroke_width = TEXT_STROKE_RESET / TEXT_STROKE_SHOWN;
+        f.word_times = std::mem::take(&mut self.word_times);
+        f.word_texts = std::mem::take(&mut self.word_texts);
+        f.word_mode = self.word_mode;
+        f.word_color = self.word_color;
+        f.anim_in = self.anim_in;
+        f.anim_in_len = self.anim_in_len;
+        f.anim_out = self.anim_out;
+        f.anim_out_len = self.anim_out_len;
+        f.anim_loop = self.anim_loop;
+        *self = f;
     }
     /// Whether the words carry the times they were heard at.
     pub fn heard(&self) -> bool {
@@ -1713,6 +1855,159 @@ impl Project {
         v.sort_by(|a, b| self.tracks[a.0].clips[a.1].start.total_cmp(&self.tracks[b.0].clips[b.1].start));
         v
     }
+
+    /// Enter in the caption list (the original's SplitTextContent, TextClient::splitText
+    /// 0x181847a90): the words before the cursor stay, the rest become a new caption right
+    /// after it. The cut falls where the first moved word was heard, or else by the share of
+    /// letters before the cursor. Returns the new caption's id.
+    pub fn split_caption(&mut self, id: u64, at: usize) -> Option<u64> {
+        let (ti, ci) = self.find_clip(id)?;
+        let c = &self.tracks[ti].clips[ci];
+        let (cut, (ta, wa, xa), (tb, wb, xb)) = c.text.as_ref()?.split_words(at, c.duration)?;
+        let new_id = self.new_id();
+        let a = &mut self.tracks[ti].clips[ci];
+        let mut b = a.clone();
+        b.id = new_id;
+        b.start = a.start + cut;
+        b.duration = a.duration - cut;
+        b.keyframes = a.keyframes.iter().filter(|k| k.t >= cut).map(|k| Keyframe { t: k.t - cut, tf: k.tf }).collect();
+        if !a.keyframes.is_empty() && b.keyframes.is_empty() {
+            b.transform = a.transform_at(a.start + cut);
+        }
+        a.keyframes.retain(|k| k.t < cut);
+        a.duration = cut;
+        a.fade_out = 0.0;
+        b.fade_in = 0.0;
+        if let (Some(sa), Some(sb)) = (a.text.as_mut(), b.text.as_mut()) {
+            (sa.content, sa.word_times, sa.word_texts) = (ta, wa, xa);
+            (sb.content, sb.word_times, sb.word_texts) = (tb, wb, xb);
+            sa.anim_out = TextAnim::None;
+            sb.anim_in = TextAnim::None;
+        }
+        self.tracks[ti].clips.insert(ci + 1, b);
+        Some(new_id)
+    }
+
+    /// Backspace at a caption's start or Delete at its end (the original's UpMergeTextContent
+    /// and DownMerge, TextClient::mergeText 0x181845a90): the later caption's words join the
+    /// earlier one, which then lasts until the later one ended.
+    pub fn merge_captions(&mut self, first: u64, second: u64) -> bool {
+        let (Some(a), Some(b)) = (self.clip(first).cloned(), self.clip(second).cloned()) else { return false };
+        let (Some(_), Some(tb)) = (a.text.as_ref(), b.text.as_ref()) else { return false };
+        let Some((ti, ci)) = self.find_clip(first) else { return false };
+        let c = &mut self.tracks[ti].clips[ci];
+        c.duration = (b.end() - a.start).max(a.duration);
+        c.fade_out = b.fade_out;
+        if let Some(s) = c.text.as_mut() {
+            s.join_words(tb, b.start - a.start);
+            s.anim_out = tb.anim_out;
+            s.anim_out_len = tb.anim_out_len;
+        }
+        if let Some((tj, cj)) = self.find_clip(second) {
+            self.tracks[tj].clips.remove(cj);
+        }
+        true
+    }
+
+    /// Take the hesitation words (um, uh, เอ่อ...) out of every caption; captions left with no
+    /// words are removed. Returns how many words went.
+    pub fn remove_fillers(&mut self) -> usize {
+        let mut gone = 0;
+        let mut empty = vec![];
+        for (ti, ci) in self.captions() {
+            let c = &mut self.tracks[ti].clips[ci];
+            let Some(s) = c.text.as_mut() else { continue };
+            let chars: Vec<char> = s.content.chars().collect();
+            let mut keep = vec![true; chars.len()];
+            for (a, b) in crate::words::split(&s.content) {
+                let w: String = chars[a..b].iter().filter(|c| c.is_alphanumeric() || thai_mark(**c)).collect::<String>().to_lowercase();
+                if FILLER_WORDS.contains(&w.as_str()) {
+                    gone += 1;
+                    keep[a..b].iter_mut().for_each(|k| *k = false);
+                }
+            }
+            if keep.iter().all(|k| *k) {
+                continue;
+            }
+            let text: String = chars.iter().zip(&keep).filter(|(_, k)| **k).map(|(c, _)| *c).collect();
+            // the spaces the words leave behind close up
+            let lines: Vec<String> = text.split('\n').map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")).collect();
+            s.content = lines.join("\n").trim().to_string();
+            if s.content.is_empty() {
+                empty.push(c.id);
+            }
+        }
+        for id in empty {
+            if let Some((ti, ci)) = self.find_clip(id) {
+                self.tracks[ti].clips.remove(ci);
+            }
+        }
+        gone
+    }
+}
+
+/// The shortest part Enter may leave on either side of a cut (seconds; CapCraft's own,
+/// estimated: the original's rule sits in a packed library).
+pub const CAPTION_PIECE_MIN: f64 = 0.1;
+
+/// Hesitation words "Remove filler words" takes out (CapCraft's own list: the original finds
+/// them with its online speech service).
+pub const FILLER_WORDS: [&str; 14] = ["um", "umm", "uh", "uhh", "uhm", "er", "erm", "ah", "hmm", "mm", "เอ่อ", "อืม", "อ่า", "เอิ่ม"];
+
+fn thai_mark(c: char) -> bool {
+    matches!(c, '\u{0E31}' | '\u{0E34}'..='\u{0E3A}' | '\u{0E47}'..='\u{0E4E}')
+}
+
+impl TextStyle {
+    /// The two parts of Enter at char `at`: where the cut falls (seconds from the start) and
+    /// each part's words with their heard times (the second part's counted from the cut).
+    #[allow(clippy::type_complexity)]
+    pub fn split_words(&self, at: usize, dur: f64) -> Option<(f64, (String, Vec<[i32; 2]>, Vec<String>), (String, Vec<[i32; 2]>, Vec<String>))> {
+        let chars: Vec<char> = self.content.chars().collect();
+        let at = at.min(chars.len());
+        let a: String = chars[..at].iter().collect::<String>().trim_end().to_string();
+        let b: String = chars[at..].iter().collect::<String>().trim_start().to_string();
+        if a.is_empty() || b.is_empty() || dur < CAPTION_PIECE_MIN * 2.0 {
+            return None;
+        }
+        let spans = self.spans(dur);
+        let heard_cut = if self.heard() { spans.iter().find(|w| w.start >= at).map(|w| w.t0_ms as f64 / 1000.0) } else { None };
+        let cut = heard_cut.unwrap_or_else(|| {
+            let letters = |s: &[char]| s.iter().filter(|c| !c.is_whitespace()).count() as f64;
+            dur * letters(&chars[..at]) / letters(&chars).max(1.0)
+        });
+        let cut = cut.clamp(CAPTION_PIECE_MIN, dur - CAPTION_PIECE_MIN);
+        let ms = (cut * 1000.0).round() as i32;
+        let (mut wa, mut xa, mut wb, mut xb) = (vec![], vec![], vec![], vec![]);
+        if self.heard() {
+            for (t, x) in self.word_times.iter().zip(&self.word_texts) {
+                if t[0] < ms {
+                    wa.push(*t);
+                    xa.push(x.clone());
+                } else {
+                    wb.push([t[0] - ms, t[1] - ms]);
+                    xb.push(x.clone());
+                }
+            }
+        }
+        Some((cut, (a, wa, xa), (b, wb, xb)))
+    }
+
+    /// Put the next caption's words after these; `gap` is how far (seconds) its start is from
+    /// this one's. Heard times stay when both had them.
+    pub fn join_words(&mut self, next: &TextStyle, gap: f64) {
+        let both = self.heard() && next.heard();
+        let sep = if self.content.ends_with(char::is_whitespace) || next.content.starts_with(char::is_whitespace) { "" } else { " " };
+        self.content = format!("{}{sep}{}", self.content, next.content);
+        if both {
+            let ms = (gap * 1000.0).round() as i32;
+            self.word_times.extend(next.word_times.iter().map(|t| [t[0] + ms, t[1] + ms]));
+            self.word_texts.extend(next.word_texts.iter().cloned());
+        } else {
+            self.word_times.clear();
+            self.word_texts.clear();
+        }
+    }
 }
 
 /// HH:MM:SS:FF like the original's player clock.
@@ -1833,5 +2128,61 @@ mod case_tests {
         p.tracks[ti1].locked = true;
         p.paste_on_tracks(vec![(TrackKind::Audio, 1, Clip::new(43, None, 50.0, 1.0))]);
         assert!(p.tracks[p.find_clip(43).unwrap().0].id != t1);
+    }
+}
+
+#[cfg(test)]
+mod caption_list_tests {
+    use super::*;
+
+    fn caption(p: &mut Project, text: &str, start: f64, dur: f64) -> u64 {
+        let id = p.new_id();
+        let mut c = Clip::new(id, None, start, dur);
+        c.text = Some(TextStyle::new(text, TextKind::Caption));
+        p.place_free(TrackKind::Text, c);
+        id
+    }
+
+    #[test]
+    fn enter_splits_where_the_moved_word_was_heard() {
+        let mut p = Project::new("t");
+        let id = caption(&mut p, "hello there world", 1.0, 3.0);
+        if let Some(s) = p.clip_mut(id).and_then(|c| c.text.as_mut()) {
+            s.word_texts = vec!["hello".into(), "there".into(), "world".into()];
+            s.word_times = vec![[0, 800], [900, 1700], [2000, 2900]];
+        }
+        let b = p.split_caption(id, 12).expect("split");
+        let (ca, cb) = (p.clip(id).unwrap().clone(), p.clip(b).unwrap().clone());
+        assert_eq!(ca.text.as_ref().unwrap().content, "hello there");
+        assert_eq!(cb.text.as_ref().unwrap().content, "world");
+        assert!((ca.duration - 2.0).abs() < 1e-9 && (cb.start - 3.0).abs() < 1e-9 && (cb.end() - 4.0).abs() < 1e-9);
+        assert_eq!(cb.text.as_ref().unwrap().word_times, vec![[0, 900]]);
+        // Backspace at the second one's start puts them back together, times and all
+        assert!(p.merge_captions(id, b));
+        let c = p.clip(id).unwrap();
+        let s = c.text.as_ref().unwrap();
+        assert_eq!(s.content, "hello there world");
+        assert_eq!(s.word_times, vec![[0, 800], [900, 1700], [2000, 2900]]);
+        assert!((c.end() - 4.0).abs() < 1e-9 && p.clip(b).is_none());
+    }
+
+    #[test]
+    fn typed_captions_split_by_their_share_of_letters() {
+        let mut p = Project::new("t");
+        let id = caption(&mut p, "ab cdef", 0.0, 3.0);
+        let b = p.split_caption(id, 2).unwrap();
+        assert!((p.clip(id).unwrap().duration - 1.0).abs() < 1e-9);
+        assert_eq!(p.clip(b).unwrap().text.as_ref().unwrap().content, "cdef");
+        assert!(p.split_caption(b, 0).is_none(), "nothing before the cursor");
+    }
+
+    #[test]
+    fn filler_words_leave_and_empty_captions_go() {
+        let mut p = Project::new("t");
+        let a = caption(&mut p, "Um, so เอ่อ we start", 0.0, 2.0);
+        let b = caption(&mut p, "uh", 2.0, 1.0);
+        assert_eq!(p.remove_fillers(), 3);
+        assert_eq!(p.clip(a).unwrap().text.as_ref().unwrap().content, "so we start");
+        assert!(p.clip(b).is_none());
     }
 }

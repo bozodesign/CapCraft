@@ -288,6 +288,41 @@ fn slider(ui: &mut egui::Ui, label: &str, v: &mut f32, range: std::ops::RangeInc
     });
 }
 
+/// A slider showing whole numbers, as the original's text panel shows them, with its reset.
+fn slider_n(ui: &mut egui::Ui, label: &str, v: &mut f32, range: std::ops::RangeInclusive<f32>, default: f32) {
+    ui.horizontal(|ui| {
+        ui.add_sized([86.0, 20.0], egui::Label::new(RichText::new(label).color(MUTED)));
+        let mut shown = v.round();
+        if ui.add(egui::Slider::new(&mut shown, range).max_decimals(0).step_by(1.0)).changed() {
+            *v = shown;
+        }
+        if (*v - default).abs() > 1e-4 && ui.small_button("↺").on_hover_text("Reset").clicked() {
+            *v = default;
+        }
+    });
+}
+
+/// An opacity slider (0..100) for a colour's alpha.
+fn alpha_row(ui: &mut egui::Ui, label: &str, c: &mut [u8; 4], default: f32) {
+    let mut a = (c[3] as f32 / 255.0 * 100.0).round();
+    let a0 = a;
+    slider_n(ui, label, &mut a, 0.0..=100.0, default);
+    if a != a0 {
+        c[3] = (a / 100.0 * 255.0).round() as u8;
+    }
+}
+
+/// A section heading with its on/off switch, as the original's panel opens a section.
+fn section(ui: &mut egui::Ui, title: &str, on: &mut bool, tip: &str) {
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(title).strong());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add(egui::Checkbox::without_text(on)).on_hover_text(tip);
+        });
+    });
+}
+
 fn color_row(ui: &mut egui::Ui, label: &str, c: &mut [u8; 4]) {
     ui.horizontal(|ui| {
         ui.add_sized([86.0, 20.0], egui::Label::new(RichText::new(label).color(MUTED)));
@@ -954,16 +989,22 @@ impl App {
                     }
                 });
             });
-            slider(ui, "Size", &mut s.size, 1.0..=100.0, CAPTION_SIZE_DEFAULT, "", 1.0);
+            ui.horizontal(|ui| {
+                ui.add_sized([86.0, 20.0], egui::Label::new(RichText::new("Size").color(MUTED)));
+                let mut v = s.size.round();
+                let r1 = ui.add(egui::Slider::new(&mut v, TEXT_SIZE_MIN..=TEXT_SIZE_MAX).max_decimals(0).step_by(1.0).logarithmic(true)).on_hover_text("Font size (5 to 300)");
+                if r1.changed() {
+                    s.size = v;
+                }
+                if (s.size - CAPTION_SIZE_DEFAULT).abs() > 1e-4 && ui.small_button("↺").on_hover_text("Reset").clicked() {
+                    s.size = CAPTION_SIZE_DEFAULT;
+                }
+            });
             ui.horizontal(|ui| {
                 ui.add_sized([86.0, 20.0], egui::Label::new(RichText::new("Style").color(MUTED)));
-                ui.toggle_value(&mut s.bold, RichText::new("B").strong());
-                ui.toggle_value(&mut s.italic, RichText::new("I").italics());
-                ui.toggle_value(&mut s.underline, RichText::new("U").underline());
-                ui.separator();
-                ui.selectable_value(&mut s.align, 0, "⬅");
-                ui.selectable_value(&mut s.align, 1, "↔");
-                ui.selectable_value(&mut s.align, 2, "➡");
+                ui.toggle_value(&mut s.bold, RichText::new("B").strong()).on_hover_text("Bold");
+                ui.toggle_value(&mut s.italic, RichText::new("I").italics()).on_hover_text("Italic");
+                ui.toggle_value(&mut s.underline, RichText::new("U").underline()).on_hover_text("Underline");
             });
             ui.horizontal(|ui| {
                 ui.add_sized([86.0, 20.0], egui::Label::new(RichText::new("Case").color(MUTED)));
@@ -976,8 +1017,24 @@ impl App {
                 }
             });
             color_row(ui, "Colour", &mut s.color);
-            slider(ui, "Letter space", &mut s.letter_spacing, 0.0..=10.0, 0.0, "", 1.0);
-            slider(ui, "Line space", &mut s.line_spacing, 0.0..=10.0, 0.0, "", 1.0);
+            slider_n(ui, "Letter space", &mut s.letter_spacing, TEXT_SPACING_MIN..=TEXT_SPACING_MAX, 0.0);
+            slider_n(ui, "Line space", &mut s.line_spacing, TEXT_SPACING_MIN..=TEXT_SPACING_MAX, 0.0);
+            ui.horizontal(|ui| {
+                ui.add_sized([86.0, 20.0], egui::Label::new(RichText::new("Align").color(MUTED)));
+                if ui.selectable_label(!s.vertical, "A→").on_hover_text("Horizontal: letters run left to right").clicked() {
+                    s.vertical = false;
+                }
+                if ui.selectable_label(s.vertical, "A↓").on_hover_text("Vertical typesetting: letters run top to bottom, lines side by side").clicked() {
+                    s.vertical = true;
+                }
+                ui.separator();
+                let names: [(&str, &str); 3] = if s.vertical { [("⬆", "Top"), ("↕", "Centre"), ("⬇", "Bottom")] } else { [("⬅", "Left"), ("↔", "Centre"), ("➡", "Right")] };
+                for (i, (icon, tip)) in names.iter().enumerate() {
+                    ui.selectable_value(&mut s.align, i as _, *icon).on_hover_text(*tip);
+                }
+            });
+            heading(ui, "Opacity");
+            slider_n(ui, "Opacity", &mut s.opacity, 0.0..=100.0, TEXT_OPACITY_RESET);
             heading(ui, "Words");
             ui.horizontal(|ui| {
                 ui.add_sized([86.0, 20.0], egui::Label::new(RichText::new("Show").color(MUTED)));
@@ -999,24 +1056,65 @@ impl App {
                     ui.label(RichText::new(format!("{n} words, about {each:.2} s each. Longer words stay a little longer. Thai words are found by themselves, no spaces needed.")).color(MUTED).size(11.0));
                 }
             }
-            heading(ui, "Outline");
-            ui.checkbox(&mut s.stroke, "Outline");
+            section(ui, "Stroke", &mut s.stroke, "An outline round the letters");
             if s.stroke {
                 color_row(ui, "Colour", &mut s.stroke_color);
-                slider(ui, "Width", &mut s.stroke_width, 0.01..=0.3, CAPTION_STROKE_W, "", 100.0);
+                let mut t = (s.stroke_width * TEXT_STROKE_SHOWN).round();
+                let t0 = t;
+                slider_n(ui, "Thickness", &mut t, 0.0..=TEXT_STROKE_MAX, TEXT_STROKE_RESET);
+                if t != t0 {
+                    s.stroke_width = t / TEXT_STROKE_SHOWN;
+                }
             }
-            heading(ui, "Background");
-            ui.checkbox(&mut s.background, "Background box");
+            section(ui, "Background", &mut s.background, "A box behind the text");
             if s.background {
+                ui.horizontal(|ui| {
+                    ui.add_sized([86.0, 20.0], egui::Label::new(RichText::new("Type").color(MUTED)));
+                    // the original puts a different corner on each type when it is picked
+                    if ui.selectable_label(!s.bg_wrap, "□").on_hover_text("Square: one box round all the text").clicked() && s.bg_wrap {
+                        s.bg_wrap = false;
+                        s.bg_round = 0.0;
+                    }
+                    if ui.selectable_label(s.bg_wrap, "≡").on_hover_text("Wrap: a box hugging each line").clicked() && !s.bg_wrap {
+                        s.bg_wrap = true;
+                        s.bg_round = TEXT_BG_WRAP_ROUND;
+                    }
+                });
                 color_row(ui, "Colour", &mut s.bg_color);
-                let mut a = s.bg_color[3] as f32 / 255.0;
-                slider(ui, "Opacity", &mut a, 0.0..=1.0, 0.63, " %", 100.0);
-                s.bg_color[3] = (a * 255.0) as u8;
+                alpha_row(ui, "Opacity", &mut s.bg_color, TEXT_BG_ALPHA_RESET);
+                let round0 = if s.bg_wrap { TEXT_BG_WRAP_ROUND } else { 0.0 };
+                slider_n(ui, "Corner", &mut s.bg_round, 0.0..=100.0, round0);
+                slider_n(ui, "Height", &mut s.bg_h, 0.0..=100.0, TEXT_BG_SIZE_RESET);
+                slider_n(ui, "Width", &mut s.bg_w, 0.0..=100.0, TEXT_BG_SIZE_RESET);
+                slider_n(ui, "Up / down", &mut s.bg_dy, 0.0..=100.0, TEXT_BG_OFFSET_RESET);
+                slider_n(ui, "Left / right", &mut s.bg_dx, 0.0..=100.0, TEXT_BG_OFFSET_RESET);
             }
-            heading(ui, "Shadow");
-            ui.checkbox(&mut s.shadow, "Shadow");
+            section(ui, "Glow", &mut s.glow, "A soft light round the letters");
+            if s.glow {
+                color_row(ui, "Colour", &mut s.glow_color);
+                slider_n(ui, "Strength", &mut s.glow_strength, TEXT_GLOW_MIN..=100.0, TEXT_GLOW_STRENGTH_RESET);
+                slider_n(ui, "Range", &mut s.glow_range, TEXT_GLOW_MIN..=100.0, TEXT_GLOW_RANGE_RESET);
+                slider_n(ui, "Vertical", &mut s.glow_v, -TEXT_GLOW_ANGLE_MAX..=TEXT_GLOW_ANGLE_MAX, 0.0);
+                slider_n(ui, "Horizontal", &mut s.glow_h, -TEXT_GLOW_ANGLE_MAX..=TEXT_GLOW_ANGLE_MAX, 0.0);
+            }
+            section(ui, "Shadow", &mut s.shadow, "A shadow behind the letters");
             if s.shadow {
                 color_row(ui, "Colour", &mut s.shadow_color);
+                alpha_row(ui, "Opacity", &mut s.shadow_color, TEXT_SHADOW_ALPHA_RESET);
+                slider_n(ui, "Blur", &mut s.shadow_blur, 0.0..=100.0, TEXT_SHADOW_BLUR_RESET);
+                slider_n(ui, "Distance", &mut s.shadow_dist, 0.0..=100.0, TEXT_SHADOW_DIST_RESET);
+                slider_n(ui, "Angle", &mut s.shadow_angle, -180.0..=180.0, TEXT_SHADOW_ANGLE_RESET);
+            }
+            section(ui, "Text bend", &mut s.curve, "Bend the text along an arc");
+            if s.curve {
+                if s.vertical {
+                    ui.label(RichText::new("Bending works on horizontal text.").color(MUTED).size(11.0));
+                }
+                slider_n(ui, "Bend", &mut s.curve_angle, -TEXT_CURVE_MAX..=TEXT_CURVE_MAX, TEXT_CURVE_RESET);
+            }
+            ui.add_space(6.0);
+            if ui.button(RichText::new("↺ ").size(15.0)).on_hover_text("Reset all text options (the words, font and animations stay)").clicked() {
+                s.reset_options();
             }
             heading(ui, "Kind");
             ui.horizontal(|ui| {

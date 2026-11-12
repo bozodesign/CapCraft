@@ -750,6 +750,167 @@ fn raster_text(s: &TextStyle, visible: usize, px: f32, max_w: f32) -> Frame {
 }
 
 fn raster_text_words(s: &TextStyle, visible: usize, px: f32, max_w: f32, words: Option<WordDraw>) -> Frame {
+    let mut f = if s.vertical { raster_vertical(s, visible, px, max_w) } else { raster_flat(s, visible, px, max_w, words) };
+    if s.curve && !s.vertical {
+        f = bend(&f, s.curve_angle);
+    }
+    // the whole text's opacity (the original's "mix", 0..100)
+    if s.opacity < 99.99 {
+        let k = (s.opacity / 100.0).clamp(0.0, 1.0);
+        for p in f.data.chunks_mut(4) {
+            p[3] = (p[3] as f32 * k).round() as u8;
+        }
+    }
+    f
+}
+
+/// Vertical typesetting: each line becomes a column of its letters (a letter keeps its marks),
+/// columns side by side from the left, placed at the top, middle or bottom by `align`.
+fn raster_vertical(s: &TextStyle, visible: usize, px: f32, max_w: f32) -> Frame {
+    let mut cols: Vec<Frame> = vec![];
+    let mut left = visible;
+    for line in s.content.split('\n') {
+        let mut clusters: Vec<String> = vec![];
+        for c in line.chars() {
+            match clusters.last_mut() {
+                Some(l) if thai_mark(c) || ('\u{0300}'..='\u{036F}').contains(&c) => l.push(c),
+                _ => clusters.push(c.to_string()),
+            }
+        }
+        let n = line.chars().count();
+        let mut col = s.clone();
+        col.vertical = false;
+        col.curve = false;
+        col.opacity = 100.0;
+        col.align = 1;
+        col.content = clusters.join("\n");
+        // the typewriter counts the column's letters plus the breaks put between them
+        let shown = if left >= n { usize::MAX } else { left + clusters.iter().scan(0usize, |a, c| { *a += c.chars().count(); Some(*a) }).take_while(|&a| a <= left).count() };
+        left = left.saturating_sub(n + 1);
+        cols.push(raster_flat(&col, shown, px, max_w, None));
+    }
+    let gap = (px * 0.1).round() as usize;
+    let w = cols.iter().map(|c| c.w).sum::<usize>() + gap * cols.len().saturating_sub(1);
+    let h = cols.iter().map(|c| c.h).max().unwrap_or(2);
+    let mut out = Frame::new(w.max(2), h.max(2));
+    let mut x0 = 0;
+    for c in &cols {
+        let y0 = match s.align {
+            0 => 0,
+            2 => h - c.h,
+            _ => (h - c.h) / 2,
+        };
+        for y in 0..c.h {
+            let src = &c.data[y * c.w * 4..(y + 1) * c.w * 4];
+            let at = ((y0 + y) * out.w + x0) * 4;
+            out.data[at..at + c.w * 4].copy_from_slice(src);
+        }
+        x0 += c.w + gap;
+    }
+    out
+}
+
+/// Bend a drawn text along an arc of `deg` degrees (positive arches up, as the original's text
+/// bend): each column of the picture turns about a centre below (or above) it.
+pub fn bend(f: &Frame, deg: f32) -> Frame {
+    let th = deg.clamp(-TEXT_CURVE_MAX, TEXT_CURVE_MAX).to_radians();
+    if th.abs() < 0.01 || f.w < 2 || f.h < 2 {
+        return f.clone();
+    }
+    if th < 0.0 {
+        // arching down: the text turned over, bent up, and turned back
+        return flip(&bend(&flip(f), -deg));
+    }
+    let (w, h) = (f.w as f32, f.h as f32);
+    let r0 = w / th;
+    // the text's middle line lies on the circle of radius r0; its top is further out
+    let sample = |x: f32, y: f32| -> [f32; 4] {
+        // y counted from the outer edge when arching up, from the inner edge otherwise
+        let (xi, yi) = (x.floor(), y.floor());
+        if xi < 0.0 || yi < 0.0 || xi >= w - 1.0 || yi >= h - 1.0 {
+            return [0.0; 4];
+        }
+        let (fx, fy) = (x - xi, y - yi);
+        let mut o = [0.0f32; 4];
+        for (dx, dy, k) in [(0, 0, (1.0 - fx) * (1.0 - fy)), (1, 0, fx * (1.0 - fy)), (0, 1, (1.0 - fx) * fy), (1, 1, fx * fy)] {
+            let i = ((yi as usize + dy) * f.w + xi as usize + dx) * 4;
+            let a = f.data[i + 3] as f32 * k;
+            for c in 0..3 {
+                o[c] += f.data[i + c] as f32 * a;
+            }
+            o[3] += a;
+        }
+        if o[3] > 0.0 {
+            for c in 0..3 {
+                o[c] /= o[3];
+            }
+        }
+        o
+    };
+    let outer = r0 + h / 2.0;
+    let inner = (r0 - h / 2.0).max(0.0);
+    let half = th / 2.0;
+    // bounds of the bent picture around the circle's centre (0, 0), the arc's middle straight up
+    let mut xs = vec![];
+    let mut ys = vec![];
+    for k in 0..=32 {
+        let a = -half + th * k as f32 / 32.0;
+        for r in [inner, outer] {
+            xs.push(r * a.sin());
+            ys.push(-r * a.cos());
+        }
+    }
+    if th > std::f32::consts::PI {
+        for a in [std::f32::consts::PI, -std::f32::consts::PI, std::f32::consts::FRAC_PI_2, -std::f32::consts::FRAC_PI_2] {
+            if a.abs() <= half {
+                xs.push(outer * a.sin());
+                ys.push(-outer * a.cos());
+            }
+        }
+    }
+    let (minx, maxx) = (xs.iter().cloned().fold(f32::MAX, f32::min).floor(), xs.iter().cloned().fold(f32::MIN, f32::max).ceil());
+    let (miny, maxy) = (ys.iter().cloned().fold(f32::MAX, f32::min).floor(), ys.iter().cloned().fold(f32::MIN, f32::max).ceil());
+    let (ow, oh) = ((maxx - minx) as usize + 2, (maxy - miny) as usize + 2);
+    let mut out = Frame::new(ow, oh);
+    for oy in 0..oh {
+        for ox in 0..ow {
+            let x = ox as f32 + minx;
+            let y = oy as f32 + miny;
+            let r = (x * x + y * y).sqrt();
+            let a = x.atan2(-y);
+            if a.abs() > half + 0.001 || r < inner - 1.0 || r > outer + 1.0 {
+                continue;
+            }
+            let sx = (a + half) * r0;
+            let sy = outer - r;
+            let p = sample(sx, sy);
+            if p[3] <= 0.0 {
+                continue;
+            }
+            let (tx, ty) = (ox, oy);
+            let i = (ty * ow + tx) * 4;
+            out.data[i] = p[0] as u8;
+            out.data[i + 1] = p[1] as u8;
+            out.data[i + 2] = p[2] as u8;
+            out.data[i + 3] = p[3].min(255.0) as u8;
+        }
+    }
+    out
+}
+
+fn flip(f: &Frame) -> Frame {
+    let mut o = Frame::new(f.w, f.h);
+    for y in 0..f.h {
+        for x in 0..f.w {
+            let a = (y * f.w + x) * 4;
+            let b = ((f.h - 1 - y) * f.w + (f.w - 1 - x)) * 4;
+            o.data[b..b + 4].copy_from_slice(&f.data[a..a + 4]);
+        }
+    }
+    o
+}
+
+fn raster_flat(s: &TextStyle, visible: usize, px: f32, max_w: f32, words: Option<WordDraw>) -> Frame {
     let Some(mut font) = font_by_name(&s.font) else { return Frame::new(2, 2) };
     // a font without the text's letters (Thai in most Windows fonts) falls back to Kanit
     let missing = |f: &FontArc| s.content.chars().any(|c| !c.is_whitespace() && f.glyph_id(c).0 == 0);
@@ -814,9 +975,17 @@ fn raster_text_words(s: &TextStyle, visible: usize, px: f32, max_w: f32, words: 
     let text_w = (0..lines.len()).map(line_w).fold(1.0f32, f32::max);
     let text_h = line_h * lines.len() as f32;
     let stroke_px = if s.stroke { (s.stroke_width * px).max(1.0) } else { 0.0 };
-    let shadow_off = if s.shadow { px * 0.06 } else { 0.0 };
-    let bg_pad = if s.background { px * 0.3 } else { 0.0 };
-    let pad = (stroke_px + shadow_off * 2.0 + bg_pad + px * 0.15 + 2.0).ceil();
+    // shadow: distance and angle (the original's 0..100 and degrees), blur from its smoothing
+    let shadow_d = if s.shadow { s.shadow_dist / 100.0 * px * TEXT_SHADOW_DIST_PX } else { 0.0 };
+    let shadow_blur = if s.shadow { (s.shadow_blur * 3.0 / 100.0) * px * TEXT_SHADOW_BLUR_PX } else { 0.0 };
+    let (sdx, sdy) = (shadow_d * s.shadow_angle.to_radians().cos(), -shadow_d * s.shadow_angle.to_radians().sin());
+    // background: its width and height beyond the text, and how far it is moved (50 = centred)
+    let (bg_px, bg_py) = if s.background { (s.bg_w / 100.0 * px * TEXT_BG_PAD_X, s.bg_h / 100.0 * px * TEXT_BG_PAD_Y) } else { (0.0, 0.0) };
+    let (bg_ox, bg_oy) = if s.background { ((s.bg_dx - 50.0) / 100.0 * px * TEXT_BG_SHIFT, (s.bg_dy - 50.0) / 100.0 * px * TEXT_BG_SHIFT) } else { (0.0, 0.0) };
+    let glow_r = if s.glow { s.glow_range / 100.0 * px * TEXT_GLOW_RANGE_PX } else { 0.0 };
+    let (gdx, gdy) = if s.glow { (s.glow_h / 100.0 * px * TEXT_GLOW_SHIFT_PX, -s.glow_v / 100.0 * px * TEXT_GLOW_SHIFT_PX) } else { (0.0, 0.0) };
+    let reach = (shadow_d + shadow_blur * 2.0).max(bg_px.max(bg_py) + bg_ox.abs().max(bg_oy.abs())).max(glow_r * 2.0 + gdx.abs().max(gdy.abs()));
+    let pad = (stroke_px + reach + px * 0.15 + 2.0).ceil();
     let italic_extra = if s.italic { text_h * 0.2 } else { 0.0 };
     let w = (text_w + italic_extra + pad * 2.0).ceil() as usize + 2;
     let h = (text_h + pad * 2.0).ceil() as usize + 2;
@@ -883,16 +1052,41 @@ fn raster_text_words(s: &TextStyle, visible: usize, px: f32, max_w: f32, words: 
     }
     let mut out = vec![0u8; w * h * 4];
     if s.background {
-        let (x0, y0, x1, y1) = (pad - bg_pad, pad - bg_pad * 0.6, pad + text_w + italic_extra + bg_pad, pad + text_h + bg_pad * 0.6);
-        let rad = px * 0.25;
+        // one box round the whole text (square), or one hugging each line (wrap)
+        let boxes: Vec<(f32, f32, f32, f32)> = if s.bg_wrap {
+            (0..lines.len())
+                .filter(|&li| line_w(li) > 0.0)
+                .map(|li| {
+                    let lw = line_w(li);
+                    let x = pad + italic_extra * 0.5 + match s.align {
+                        0 => 0.0,
+                        2 => text_w - lw,
+                        _ => (text_w - lw) / 2.0,
+                    };
+                    let y = pad + li as f32 * line_h;
+                    (x, y, x + lw, y + line_h)
+                })
+                .collect()
+        } else {
+            vec![(pad, pad, pad + text_w + italic_extra, pad + text_h)]
+        };
         let mut m = vec![0.0f32; w * h];
-        for y in 0..h {
-            for x in 0..w {
-                let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-                let qx = (x0 + rad - fx).max(fx - (x1 - rad)).max(0.0);
-                let qy = (y0 + rad - fy).max(fy - (y1 - rad)).max(0.0);
-                let d = (qx * qx + qy * qy).sqrt() - rad;
-                m[y * w + x] = (0.5 - d).clamp(0.0, 1.0);
+        for (bx0, by0, bx1, by1) in boxes {
+            let (x0, y0, x1, y1) = (bx0 - bg_px + bg_ox, by0 - bg_py + bg_oy, bx1 + bg_px + bg_ox, by1 + bg_py + bg_oy);
+            // the corner: 0..100 of half the box's shorter side
+            let rad = (s.bg_round / 100.0).clamp(0.0, 1.0) * ((x1 - x0).min(y1 - y0) / 2.0);
+            for y in 0..h {
+                for x in 0..w {
+                    let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+                    let qx = (x0 + rad - fx).max(fx - (x1 - rad)).max(0.0);
+                    let qy = (y0 + rad - fy).max(fy - (y1 - rad)).max(0.0);
+                    let inside_x = fx >= x0 - 0.5 && fx <= x1 + 0.5;
+                    let inside_y = fy >= y0 - 0.5 && fy <= y1 + 0.5;
+                    let d = if rad > 0.0 { (qx * qx + qy * qy).sqrt() - rad } else if inside_x && inside_y { -1.0 } else { 1.0 };
+                    let v = (0.5 - d).clamp(0.0, 1.0);
+                    let i = y * w + x;
+                    m[i] = m[i].max(v);
+                }
             }
         }
         blend_mask(&mut out, &m, s.bg_color, 0, 0, w, h);
@@ -901,10 +1095,19 @@ fn raster_text_words(s: &TextStyle, visible: usize, px: f32, max_w: f32, words: 
     if s.shadow {
         let base = outline.as_ref().unwrap_or(&fill);
         let mut sh = Frame { w, h, data: base.iter().flat_map(|v| [0, 0, 0, (v * 255.0) as u8]).collect() };
-        blur(&mut sh, (px * 0.05) as usize);
+        blur(&mut sh, shadow_blur.round() as usize);
         let m: Vec<f32> = sh.data.chunks(4).map(|p| p[3] as f32 / 255.0).collect();
-        let o = shadow_off.round() as i64;
-        blend_mask(&mut out, &m, s.shadow_color, o, o, w, h);
+        blend_mask(&mut out, &m, s.shadow_color, sdx.round() as i64, sdy.round() as i64, w, h);
+    }
+    if s.glow {
+        // a soft light round the letters in the glow colour
+        let base = outline.as_ref().unwrap_or(&fill);
+        let grown = dilate(base, w, h, glow_r * 0.3);
+        let mut gl = Frame { w, h, data: grown.iter().flat_map(|v| [0, 0, 0, (v * 255.0) as u8]).collect() };
+        blur(&mut gl, glow_r.round() as usize);
+        let k = (s.glow_strength / 100.0 * TEXT_GLOW_GAIN).clamp(0.0, 1.0);
+        let m: Vec<f32> = gl.data.chunks(4).map(|p| (p[3] as f32 / 255.0 * k).min(1.0)).collect();
+        blend_mask(&mut out, &m, s.glow_color, gdx.round() as i64, gdy.round() as i64, w, h);
     }
     if let Some(o) = &outline {
         blend_mask(&mut out, o, s.stroke_color, 0, 0, w, h);
@@ -915,6 +1118,19 @@ fn raster_text_words(s: &TextStyle, visible: usize, px: f32, max_w: f32, words: 
     }
     Frame { w, h, data: out }
 }
+
+/// How the original's 0..100 text values become pixels at a font size of `px` (CapCraft's
+/// own, estimated: the original turns them into pixels in a packed library). Chosen so the
+/// panel's defaults draw as CapCraft's text looked before: background 14 → 0.28 × size beside
+/// the text, shadow distance 5 → 0.06 × size, shadow blur 15 → 0.05 × size.
+pub const TEXT_BG_PAD_X: f32 = 2.0;
+pub const TEXT_BG_PAD_Y: f32 = 1.2;
+pub const TEXT_BG_SHIFT: f32 = 2.0;
+pub const TEXT_SHADOW_DIST_PX: f32 = 1.2;
+pub const TEXT_SHADOW_BLUR_PX: f32 = 0.11;
+pub const TEXT_GLOW_RANGE_PX: f32 = 0.5;
+pub const TEXT_GLOW_SHIFT_PX: f32 = 1.0;
+pub const TEXT_GLOW_GAIN: f32 = 1.5;
 
 // ---------------------------------------------------------------- renderer
 
@@ -1702,6 +1918,42 @@ mod tests {
             let g = ink(&s);
             let _ = image::save_buffer(format!("{dir}/thai_kanit_bold.png"), &g.data, g.w as u32, g.h as u32, image::ColorType::Rgba8);
             let _ = image::save_buffer(format!("{dir}/thai_fallback.png"), &f.data, f.w as u32, f.h as u32, image::ColorType::Rgba8);
+        }
+    }
+
+    #[test]
+    fn the_text_panels_options_change_the_drawing() {
+        let base = TextStyle::new("Hello\nworld", TextKind::Title);
+        let plain = ink(&base);
+        let lit = |f: &Frame| f.data.chunks(4).filter(|p| p[3] > 128).count();
+        let mut v = base.clone();
+        v.vertical = true;
+        let tall = ink(&v);
+        assert!(tall.h > plain.h && tall.w < plain.w, "vertical text runs down");
+        let mut b = base.clone();
+        b.curve = true;
+        let bent = ink(&b);
+        assert!(bent.h > plain.h && lit(&bent) > lit(&plain) / 2, "bent text keeps its letters");
+        b.curve_angle = -72.0;
+        assert!(lit(&ink(&b)) > lit(&plain) / 2);
+        let mut o = base.clone();
+        o.opacity = 50.0;
+        let half = ink(&o);
+        let top = |f: &Frame| f.data.chunks(4).map(|p| p[3]).max().unwrap_or(0);
+        assert!((top(&half) as i32 - 128).abs() <= 2, "half opacity");
+        let mut g = base.clone();
+        g.glow = true;
+        assert!(lit(&ink(&g)) > lit(&plain), "glow lights round the letters");
+        let mut sq = base.clone();
+        sq.background = true;
+        let mut wr = sq.clone();
+        wr.bg_wrap = true;
+        // a box hugging each line covers less than one round both
+        assert!(lit(&ink(&wr)) < lit(&ink(&sq)));
+        if let Ok(dir) = std::env::var("CUTSTUDIO_TEST_OUT") {
+            for (n, f) in [("vertical", tall), ("bent", bent), ("wrap", ink(&wr))] {
+                let _ = image::save_buffer(format!("{dir}/text_{n}.png"), &f.data, f.w as u32, f.h as u32, image::ColorType::Rgba8);
+            }
         }
     }
 }

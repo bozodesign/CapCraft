@@ -571,45 +571,218 @@ impl App {
         ui.label(egui::RichText::new("Auto captions, type them, or import a subtitle file (.srt). Words keep the times they were said, for word-by-word display.").color(MUTED).size(11.0));
         let caps = self.project.captions();
         Self::section(ui, &format!("Captions ({})", caps.len()));
-        let mut remove = None;
-        let mut seek = None;
-        for (ti, ci) in caps {
+        // find, and find & replace (the original's caption search and its Replace all)
+        let qid = egui::Id::new("cap_search");
+        let (mut query, mut with, mut replacing, mut cur) = ui.data(|d| d.get_temp::<(String, String, bool, usize)>(qid)).unwrap_or_default();
+        let q = query.to_lowercase();
+        let hits: Vec<u64> = if q.is_empty() {
+            vec![]
+        } else {
+            caps.iter().filter_map(|&(ti, ci)| {
+                let c = &self.project.tracks[ti].clips[ci];
+                c.text.as_ref().filter(|s| s.content.to_lowercase().contains(&q)).map(|_| c.id)
+            }).collect()
+        };
+        if cur >= hits.len() {
+            cur = 0;
+        }
+        let mut jump = None;
+        let mut replace_one = false;
+        let mut replace_all = false;
+        ui.horizontal(|ui| {
+            let w = (ui.available_width() - 110.0).max(80.0);
+            let r = ui.add(egui::TextEdit::singleline(&mut query).thai().hint_text("🔍 Search captions").desired_width(w));
+            if r.changed() {
+                cur = 0;
+                jump = Some(0);
+            }
+            if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !hits.is_empty() {
+                cur = (cur + 1) % hits.len();
+                jump = Some(cur);
+                r.request_focus();
+            }
+            let n = hits.len();
+            ui.label(egui::RichText::new(if q.is_empty() { String::new() } else if n == 0 { "0/0".into() } else { format!("{}/{n}", cur + 1) }).color(MUTED).size(11.0));
+            if ui.add_enabled(n > 0, egui::Button::new("▲").small()).on_hover_text("Previous match").clicked() {
+                cur = (cur + n - 1) % n;
+                jump = Some(cur);
+            }
+            if ui.add_enabled(n > 0, egui::Button::new("▼").small()).on_hover_text("Next match").clicked() {
+                cur = (cur + 1) % n;
+                jump = Some(cur);
+            }
+            ui.toggle_value(&mut replacing, "⇄").on_hover_text("Find and replace");
+        });
+        if replacing {
+            ui.horizontal(|ui| {
+                let w = (ui.available_width() - 110.0).max(80.0);
+                ui.add(egui::TextEdit::singleline(&mut with).thai().hint_text("Replace with").desired_width(w));
+                let ok = !hits.is_empty();
+                replace_one = ui.add_enabled(ok, egui::Button::new("Replace").small()).on_hover_text("Replace in this match's caption").clicked();
+                replace_all = ui.add_enabled(ok, egui::Button::new("All").small()).on_hover_text("Replace all: every caption").clicked();
+            });
+        }
+        ui.horizontal(|ui| {
+            if ui.button("🧹").on_hover_text("Remove filler words (um, uh, เอ่อ, อืม...) from every caption").clicked() {
+                let n = self.project.remove_fillers();
+                self.notify(&if n == 0 { "No filler words found".to_string() } else { format!("Removed {n} filler words") });
+            }
+            ui.label(egui::RichText::new("ⓘ").color(MUTED)).on_hover_text(
+                "In the list: Enter splits a caption at the cursor, Shift+Enter starts a new line, Backspace at the start joins it to the one before, Delete at the end joins the next one, ↑ ↓ move between captions.\n\nTranslating, two-language captions and keyword highlight use the original's online service, so they aren't here.",
+            );
+        });
+        let hits_now = hits.clone();
+        if replace_all || replace_one {
+            let targets: Vec<u64> = if replace_all { hits.clone() } else { hits.get(cur).copied().into_iter().collect() };
+            for id in targets {
+                if let Some(s) = self.project.clip_mut(id).and_then(|c| c.text.as_mut()) {
+                    s.content = replace_ci(&s.content, &query, &with);
+                }
+            }
+        }
+        ui.data_mut(|d| d.insert_temp(qid, (query, with, replacing, cur)));
+        let jump_to = jump.and_then(|k| hits_now.get(k).copied());
+
+        enum Act {
+            Seek(u64, f64),
+            Remove(u64),
+            Split(u64, usize),
+            MergeUp(usize),
+            MergeDown(usize),
+            Focus(usize, bool),
+            AddAfter(u64),
+        }
+        let mut act = None;
+        let ids: Vec<u64> = caps.iter().map(|&(ti, ci)| self.project.tracks[ti].clips[ci].id).collect();
+        for (k, (ti, ci)) in caps.iter().copied().enumerate() {
             let fps = self.project.fps;
             let c = &mut self.project.tracks[ti].clips[ci];
             let id = c.id;
             let selected = self.selection == Selection::Clip(id);
             let active = self.playhead >= c.start && self.playhead < c.end();
-            egui::Frame::new()
+            let hit = hits_now.contains(&id);
+            let eid = egui::Id::new(("cap_edit", id));
+            let fr = egui::Frame::new()
                 .fill(if selected { BG3 } else { BG2 })
-                .stroke(Stroke::new(1.0_f32, if active { ACCENT } else { LINE }))
+                .stroke(Stroke::new(1.0_f32, if hit { Color32::from_rgb(255, 214, 10) } else if active { ACCENT } else { LINE }))
                 .corner_radius(6.0)
                 .inner_margin(egui::Margin::same(6))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         if ui.add(egui::Label::new(egui::RichText::new(format!("{} → {}", timecode(c.start, fps), timecode(c.end(), fps))).monospace().size(10.5).color(MUTED)).sense(Sense::click())).clicked() {
-                            seek = Some((id, c.start));
+                            act = Some(Act::Seek(id, c.start));
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.small_button("🗑").on_hover_text("Delete caption").clicked() {
-                                remove = Some(id);
+                                act = Some(Act::Remove(id));
+                            }
+                            if ui.small_button("+").on_hover_text("New caption after this one").clicked() {
+                                act = Some(Act::AddAfter(id));
                             }
                         });
                     });
                     if let Some(s) = &mut c.text {
-                        let r = ui.add(egui::TextEdit::multiline(&mut s.content).thai().desired_rows(1).desired_width(f32::INFINITY));
-                        if r.gained_focus() {
-                            seek = Some((id, c.start));
+                        // keys the original's caption list gives a caption being typed in
+                        if ui.memory(|m| m.has_focus(eid)) {
+                            let cursor = egui::text_edit::TextEditState::load(ui.ctx(), eid).and_then(|st| st.cursor.char_range());
+                            let (at, none_picked) = cursor.map(|r| (r.primary.index, r.primary.index == r.secondary.index)).unwrap_or((0, true));
+                            let n = s.content.chars().count();
+                            let first_line = !s.content.chars().take(at).any(|c| c == '\n');
+                            let last_line = !s.content.chars().skip(at).any(|c| c == '\n');
+                            if take_key(ui, egui::Key::Enter, false) {
+                                act = Some(Act::Split(id, at));
+                            } else if none_picked && at == 0 && k > 0 && take_key(ui, egui::Key::Backspace, false) {
+                                act = Some(Act::MergeUp(k));
+                            } else if none_picked && at >= n && k + 1 < ids.len() && take_key(ui, egui::Key::Delete, false) {
+                                act = Some(Act::MergeDown(k));
+                            } else if first_line && k > 0 && take_key(ui, egui::Key::ArrowUp, false) {
+                                act = Some(Act::Focus(k - 1, true));
+                            } else if last_line && k + 1 < ids.len() && take_key(ui, egui::Key::ArrowDown, false) {
+                                act = Some(Act::Focus(k + 1, false));
+                            }
+                        }
+                        let r = ui.add(
+                            egui::TextEdit::multiline(&mut s.content)
+                                .id(eid)
+                                .thai()
+                                .desired_rows(1)
+                                .desired_width(f32::INFINITY)
+                                .return_key(egui::KeyboardShortcut::new(egui::Modifiers::SHIFT, egui::Key::Enter)),
+                        );
+                        if r.gained_focus() && act.is_none() {
+                            act = Some(Act::Seek(id, c.start));
                         }
                     }
                 });
+            if fr.response.hovered() && !selected {
+                ui.painter().rect_stroke(fr.response.rect, 6.0, Stroke::new(1.0_f32, MUTED), egui::StrokeKind::Inside);
+            }
+            if jump_to == Some(id) {
+                fr.response.scroll_to_me(Some(egui::Align::Center));
+                act = Some(Act::Seek(id, c.start));
+            }
         }
-        if let Some((id, t)) = seek {
-            self.selection = Selection::Clip(id);
-            self.seek(t + 1e-3);
-        }
-        if let Some(id) = remove {
-            self.selection = Selection::Clip(id);
-            self.delete_selected();
+        let focus = |ctx: &egui::Context, id: u64, at: usize| {
+            let eid = egui::Id::new(("cap_edit", id));
+            let mut st = egui::text_edit::TextEditState::load(ctx, eid).unwrap_or_default();
+            st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(at))));
+            st.store(ctx, eid);
+            ctx.memory_mut(|m| m.request_focus(eid));
+        };
+        let len_of = |p: &Project, id: u64| p.clip(id).and_then(|c| c.text.as_ref()).map(|s| s.content.chars().count()).unwrap_or(0);
+        match act {
+            Some(Act::Seek(id, t)) => {
+                self.selection = Selection::Clip(id);
+                self.seek(t + 1e-3);
+            }
+            Some(Act::Remove(id)) => {
+                self.selection = Selection::Clip(id);
+                self.delete_selected();
+            }
+            Some(Act::Split(id, at)) => match self.project.split_caption(id, at) {
+                Some(new_id) => {
+                    self.selection = Selection::Clip(new_id);
+                    if let Some(t) = self.project.clip(new_id).map(|c| c.start) {
+                        self.seek(t + 1e-3);
+                    }
+                    focus(ui.ctx(), new_id, 0);
+                }
+                None => self.notify("Put the cursor between words to split this caption"),
+            },
+            Some(Act::MergeUp(k)) => {
+                let (a, b) = (ids[k - 1], ids[k]);
+                let at = len_of(&self.project, a);
+                if self.project.merge_captions(a, b) {
+                    self.selection = Selection::Clip(a);
+                    focus(ui.ctx(), a, at);
+                }
+            }
+            Some(Act::MergeDown(k)) => {
+                let (a, b) = (ids[k], ids[k + 1]);
+                let at = len_of(&self.project, a);
+                if self.project.merge_captions(a, b) {
+                    self.selection = Selection::Clip(a);
+                    focus(ui.ctx(), a, at);
+                }
+            }
+            Some(Act::Focus(k, at_end)) => {
+                let id = ids[k];
+                let at = if at_end { len_of(&self.project, id) } else { 0 };
+                self.selection = Selection::Clip(id);
+                if let Some(t) = self.project.clip(id).map(|c| c.start) {
+                    self.seek(t + 1e-3);
+                }
+                focus(ui.ctx(), id, at);
+            }
+            Some(Act::AddAfter(id)) => {
+                if let Some(t) = self.project.clip(id).map(|c| c.end()) {
+                    self.add_text_at(TextStyle::new("New caption", TextKind::Caption), t);
+                    if let Selection::Clip(n) = self.selection {
+                        focus(ui.ctx(), n, 0);
+                    }
+                }
+            }
+            None => {}
         }
     }
 
@@ -739,4 +912,50 @@ impl App {
 pub fn mixc(a: Color32, b: Color32, t: f32) -> Color32 {
     let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t) as u8;
     Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
+}
+
+/// Take a key press with exactly this Shift state (and no Ctrl or Alt) out of this frame's
+/// input, so the text box doesn't also act on it.
+fn take_key(ui: &egui::Ui, key: egui::Key, shift: bool) -> bool {
+    ui.input_mut(|i| {
+        let at = i.events.iter().position(|e| matches!(e, egui::Event::Key { key: k, pressed: true, modifiers, .. } if *k == key && modifiers.shift == shift && !modifiers.ctrl && !modifiers.alt && !modifiers.command));
+        match at {
+            Some(p) => {
+                i.events.remove(p);
+                true
+            }
+            None => false,
+        }
+    })
+}
+
+/// Replace every `what` in `text`, any letter case (as the original's Replace all).
+pub fn replace_ci(text: &str, what: &str, with: &str) -> String {
+    if what.is_empty() {
+        return text.to_string();
+    }
+    let lower: Vec<char> = text.chars().flat_map(|c| { let l: Vec<char> = c.to_lowercase().collect(); if l.len() == 1 { l } else { vec![c] } }).collect();
+    let chars: Vec<char> = text.chars().collect();
+    let w: Vec<char> = what.to_lowercase().chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if i + w.len() <= lower.len() && lower[i..i + w.len()] == w[..] {
+            out.push_str(with);
+            i += w.len();
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn replace_all_ignores_letter_case() {
+        assert_eq!(super::replace_ci("Cat and cat, CAT", "cat", "dog"), "dog and dog, dog");
+        assert_eq!(super::replace_ci("วันนี้ดี", "ดี", "เยี่ยม"), "วันนี้เยี่ยม");
+    }
 }
