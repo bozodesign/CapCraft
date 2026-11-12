@@ -1364,6 +1364,23 @@ impl Renderer {
         }
     }
 
+    /// Ask for the first frame of every video clip that starts within `ahead` seconds after `t`,
+    /// at the size `render` will want it, so its decoder is running and its first picture is
+    /// ready when the playhead gets there (no black frame at a cut).
+    pub fn warm_up(&self, p: &Project, t: f64, ahead: f64, cw: usize, ch: usize, src: &mut dyn Sources) {
+        for tr in p.tracks.iter().filter(|tr| !tr.hidden && matches!(tr.kind, TrackKind::Main | TrackKind::Overlay)) {
+            for c in tr.clips.iter().filter(|c| c.start > t && c.start <= t + ahead) {
+                let Some(m) = c.media.and_then(|id| p.media(id)) else { continue };
+                if m.kind != MediaKind::Video {
+                    continue;
+                }
+                let (fw, fh) = fit_size(m.width, m.height, cw, ch);
+                let st = c.src_time(c.start).min((m.duration - 0.5 / m.fps.max(1.0)).max(0.0));
+                src.video(c.id, m, st, fw, fh);
+            }
+        }
+    }
+
     /// Render the whole project at time `t` into a `cw`×`ch` picture.
     pub fn render(&mut self, p: &Project, t: f64, cw: usize, ch: usize, src: &mut dyn Sources) -> (Frame, Vec<LayerBox>) {
         let mut out = Frame::filled(cw, ch, [0, 0, 0, 255]);
@@ -1413,6 +1430,40 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Asked(Vec<(u64, f64)>);
+    impl Sources for Asked {
+        fn video(&mut self, clip_id: u64, _m: &Media, src_t: f64, _w: usize, _h: usize) -> Option<Arc<Frame>> {
+            self.0.push((clip_id, src_t));
+            None
+        }
+        fn image(&mut self, _m: &Media, _w: usize, _h: usize) -> Option<Arc<Frame>> {
+            None
+        }
+    }
+
+    #[test]
+    fn the_next_clip_is_started_before_the_cut() {
+        let mut p = Project::new("cut");
+        let mid = p.new_id();
+        p.media.push(Media { id: mid, kind: MediaKind::Video, path: "v.mp4".into(), name: "v".into(), duration: 10.0, width: 1920, height: 1080, has_audio: false, fps: 30.0, color: [0; 4], color2: [0; 4] });
+        let (a, b) = (p.new_id(), p.new_id());
+        let mut cb = Clip::new(b, Some(mid), 0.0, 3.0);
+        cb.src_in = 4.0;
+        let mi = p.main_index();
+        p.tracks[mi].clips.push(Clip::new(a, Some(mid), 0.0, 2.0));
+        p.tracks[mi].clips.push(cb);
+        p.relayout();
+        let r = Renderer::new();
+        let mut s = Asked(vec![]);
+        r.warm_up(&p, 1.0, 1.5, 640, 360, &mut s);
+        assert_eq!(s.0, vec![(b, 4.0)]);
+        // too far ahead, or already showing: nothing is started
+        let mut s = Asked(vec![]);
+        r.warm_up(&p, 0.2, 1.5, 640, 360, &mut s);
+        r.warm_up(&p, 2.5, 1.5, 640, 360, &mut s);
+        assert!(s.0.is_empty());
+    }
 
     #[test]
     fn grade_neutral_and_wheels() {

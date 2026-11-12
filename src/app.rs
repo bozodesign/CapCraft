@@ -173,7 +173,12 @@ struct PreviewSources<'a> {
     ctx: &'a egui::Context,
     fps: f64,
     settled: bool,
+    /// A video showing now has no picture yet (its decoder is still starting).
+    waiting: bool,
 }
+
+/// How far ahead of the playhead the player starts the decoders of the clips coming up.
+pub const PREROLL_SECONDS: f64 = 1.5;
 
 impl Sources for PreviewSources<'_> {
     fn video(&mut self, clip_id: u64, m: &Media, src_t: f64, w: usize, h: usize) -> Option<Arc<Frame>> {
@@ -183,6 +188,9 @@ impl Sources for PreviewSources<'_> {
         let f = r.request(src_t);
         if !r.is_settled(src_t) {
             self.settled = false;
+            if f.is_none() {
+                self.waiting = true;
+            }
         }
         f
     }
@@ -1974,9 +1982,21 @@ impl App {
             self.preview_size = (pw, ph);
         }
         let t = tq as f64 / fps + 1e-6;
-        let mut src = PreviewSources { readers: &mut self.readers, images: &self.images, ctx, fps, settled: true };
+        let mut src = PreviewSources { readers: &mut self.readers, images: &self.images, ctx, fps, settled: true, waiting: false };
         let (frame, boxes) = self.renderer.render(&self.project, t, pw, ph, &mut src);
-        let settled = src.settled;
+        let (settled, waiting) = (src.settled, src.waiting);
+        // start the clips coming up, so each one's first picture is ready at the cut
+        if self.playing {
+            src.settled = true;
+            self.renderer.warm_up(&self.project, t, PREROLL_SECONDS, pw, ph, &mut src);
+        }
+        // a clip whose decoder hasn't delivered its first picture yet: keep showing the last
+        // picture instead of a black one, and draw again when it arrives
+        if waiting && self.preview_tex.is_some() {
+            self.preview_key = (i64::MIN, 0, 0, 0, 0);
+            self.readers.retain(|_, r| r.last_used.elapsed().as_secs_f32() < 4.0);
+            return;
+        }
         self.preview_boxes = boxes;
         let img = egui::ColorImage::from_rgba_unmultiplied([frame.w, frame.h], &frame.data);
         match &mut self.preview_tex {
