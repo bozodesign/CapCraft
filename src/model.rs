@@ -1394,6 +1394,16 @@ pub struct Project {
     pub captions_share_style: bool,
 }
 
+/// Whether two clips cover some of the same time. Touching ends don't count: the original's
+/// get_conflict_segments (videoeditor.dll 0x1810bbe70) counts a clash only when
+/// `a.start < b.end` and `b.start < a.end`.
+pub fn overlaps(a: &Clip, b: &Clip) -> bool {
+    a.start < b.end() - CLASH_EPS && b.start < a.end() - CLASH_EPS
+}
+
+/// Time (seconds) two clips may share before they count as covering each other: rounding only.
+pub const CLASH_EPS: f64 = 1e-6;
+
 impl Project {
     pub fn new(name: &str) -> Self {
         let mut p = Project {
@@ -1566,6 +1576,34 @@ impl Project {
         }
     }
 
+    /// Several clips that moved together and landed on others: they go together, keeping their
+    /// times, onto the first track of `kind` (not locked) where all of them fit, or onto one new
+    /// track (the original's move_conflict_segments, videoeditor.dll 0x1810bfc40). Clips that
+    /// would cover each other can't share a track, so then each finds its own place.
+    pub fn place_free_together(&mut self, kind: TrackKind, clips: Vec<Clip>) {
+        if clips.is_empty() {
+            return;
+        }
+        let apart = clips.iter().enumerate().all(|(i, a)| clips.iter().skip(i + 1).all(|b| !overlaps(a, b)));
+        if !apart {
+            for c in clips {
+                self.place_free(kind, c);
+            }
+            return;
+        }
+        if let Some(tr) = self.tracks.iter_mut().find(|t| t.kind == kind && !t.locked && clips.iter().all(|c| t.clips.iter().all(|o| !overlaps(c, o)))) {
+            tr.clips.extend(clips);
+            tr.clips.sort_by(|a, b| a.start.total_cmp(&b.start));
+        } else {
+            let tid = self.new_id();
+            let mut clips = clips;
+            clips.sort_by(|a, b| a.start.total_cmp(&b.start));
+            let pos = self.tracks.iter().rposition(|t| t.kind == kind).map(|p| p + 1).unwrap_or(self.tracks.len());
+            self.tracks.insert(pos, Track { id: tid, kind, clips, muted: false, hidden: false, locked: false });
+        }
+        self.relayout();
+    }
+
     /// Place a clip on a track of `kind` at its start, using the first track
     /// where it doesn't overlap, or a new one.
     pub fn place_free(&mut self, kind: TrackKind, clip: Clip) -> u64 {
@@ -1672,5 +1710,26 @@ mod case_tests {
         assert_eq!(p.clip(11).unwrap().start, 4.0);
         // nothing left to fix the second time
         assert!(!p.sound_files_as_sound());
+    }
+
+    #[test]
+    fn picked_clips_that_land_on_others_go_together_to_one_track() {
+        let mut p = Project::new("t");
+        let tid = p.new_id();
+        let mut a = Clip::new(20, None, 0.0, 2.0);
+        a.text = None;
+        p.tracks.push(Track { id: tid, kind: TrackKind::Audio, clips: vec![Clip::new(21, None, 1.0, 2.0)], muted: false, hidden: false, locked: false });
+        // touching ends aren't a clash; covering is
+        assert!(!overlaps(&Clip::new(1, None, 0.0, 1.0), &Clip::new(2, None, 1.0, 1.0)));
+        assert!(overlaps(&Clip::new(1, None, 0.0, 1.5), &Clip::new(2, None, 1.0, 1.0)));
+        let b = Clip::new(22, None, 5.0, 1.0);
+        let before = p.tracks.len();
+        p.place_free_together(TrackKind::Audio, vec![a, b]);
+        // the first doesn't fit on the sound track, so both go on one new one, times kept
+        assert_eq!(p.tracks.len(), before + 1);
+        let (ta, _) = p.find_clip(20).unwrap();
+        let (tb, _) = p.find_clip(22).unwrap();
+        assert_eq!(ta, tb);
+        assert_eq!(p.clip(22).unwrap().start, 5.0);
     }
 }

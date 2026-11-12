@@ -1508,17 +1508,24 @@ impl App {
                 }
             }
         }
-        // the picked clips that moved along: any that landed on another clip find a free track
-        for &(gid, _) in &d.group {
-            let Some((gti, gci)) = self.project.find_clip(gid) else { continue };
-            if self.project.tracks[gti].kind == TrackKind::Main {
-                continue;
-            }
-            if !fits(&self.project.tracks[gti], &self.project.tracks[gti].clips[gci]) {
-                let k = self.project.tracks[gti].kind;
-                let gc = self.project.tracks[gti].clips.remove(gci);
-                self.project.place_free(k, gc);
-            }
+        // the picked clips that moved along: those that landed on a clip that didn't move are
+        // taken off together and go, keeping their times, onto one track where they all fit
+        // (the original's move_segments_if_conflict 0x1810c0de0 → get_conflict_segments
+        // 0x1810bbe70 → move_conflict_segments 0x1810bfc40)
+        let moved: Vec<u64> = d.group.iter().map(|g| g.0).chain(std::iter::once(id)).collect();
+        let mut clashing: Vec<(TrackKind, Clip)> = vec![];
+        for tr in self.project.tracks.iter_mut().filter(|t| t.kind != TrackKind::Main) {
+            let still: Vec<Clip> = tr.clips.iter().filter(|c| !moved.contains(&c.id)).cloned().collect();
+            let k = tr.kind;
+            let (out, keep): (Vec<Clip>, Vec<Clip>) = std::mem::take(&mut tr.clips)
+                .into_iter()
+                .partition(|c| c.id != id && moved.contains(&c.id) && still.iter().any(|o| crate::model::overlaps(c, o)));
+            tr.clips = keep;
+            clashing.extend(out.into_iter().map(|c| (k, c)));
+        }
+        for k in [TrackKind::Overlay, TrackKind::Audio, TrackKind::Text] {
+            let set: Vec<Clip> = clashing.iter().filter(|(ck, _)| *ck == k).map(|(_, c)| c.clone()).collect();
+            self.project.place_free_together(k, set);
         }
         self.project.relayout();
         self.selection = Selection::Clip(id);
