@@ -1,5 +1,6 @@
 # build output
 /target/
+/dist/
 /tools/dlltool-shim/target/
 
 # big or third-party files kept only on the computer that builds it

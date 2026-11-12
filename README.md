@@ -169,6 +169,19 @@ rustflags = ["-C", "dlltool=C:/path/to/dlltool.exe"]
 
 Run the tests with `cargo test`.
 
+### Making a zip to share
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\make-portable.ps1                # the app (about 75 MB)
+powershell -ExecutionPolicy Bypass -File tools\make-portable.ps1 -WithCaptions  # also the auto-captions pack
+```
+
+This builds the release program and writes `dist\CapCraft-<version>-windows.zip`: `CapCraft.exe`,
+`ffmpeg.exe`, `ffprobe.exe` (taken from `C:\ffmpeg`, or `-FFmpegDir`), a read-me and the licences.
+Whoever gets it unzips it and double-clicks `CapCraft.exe`; nothing needs installing, because the program
+only uses files that come with Windows. `-WithCaptions` also writes `dist\CapCraft-<version>-auto-captions.zip`
+with the `whisper` folder (about 2 GB), which goes beside `CapCraft.exe`.
+
 ---
 
 ## Where your files go
