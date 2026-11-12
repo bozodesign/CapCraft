@@ -1,0 +1,18 @@
+# build output
+/target/
+/tools/dlltool-shim/target/
+
+# big or third-party files kept only on the computer that builds it
+/whisper/
+/tools/binutils-dl/
+/.cargo/
+
+# screenshots and test clips
+/shots/
+
+# notes kept private
+/MECHANICS.md
+/mechanics.json
+
+*.log
+*.tmp

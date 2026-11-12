@@ -1,0 +1,41 @@
+[package]
+name = "capcraft"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "CapCraft"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "accesskit"] }
+egui = "0.31"
+epaint_default_fonts = "0.31"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "webp", "gif"] }
+ab_glyph = "0.2"
+rayon = "1.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rfd = "0.15"
+rodio = { version = "0.20", default-features = false }
+egui_dock = { version = "0.16", features = ["serde"] }
+# text shaping: places Thai vowels and tone marks by the font's own rules
+rustybuzz = "0.20"
+
+# reads (and on request unmutes) CapCraft's own entry in the Windows Volume Mixer
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_System_Com"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = "debuginfo"
+panic = "unwind"
+
+[profile.dev]
+opt-level = 2
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 3
