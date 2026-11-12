@@ -96,8 +96,16 @@ pub const IMAGE_SECONDS_MAX: f64 = 100.0;
 pub const IMAGE_SECONDS_STEP: f64 = 0.1;
 pub const IMAGE_FRAMES_MIN: f64 = 1.0;
 pub const IMAGE_FRAMES_MAX: f64 = 3000.0;
-/// The frames value before the person sets one: the 5 s default at 30 fps (estimated).
+/// The frames value before the person sets one: 150, as the original's GlobalSetting
+/// constructor (VECreator.dll 0x1810b3e80) stores it (+0xc8), beside 5.0 s (+0xc0) and unit "s".
 pub const IMAGE_FRAMES_DEFAULT: i32 = 150;
+
+/// Shift + ← / → moves the playhead this many frames (the original's "frames forward/back"
+/// setting, timelineLargeAdjustRange): 10 by default (GlobalSetting constructor 0x1810b3e80,
+/// +0x14c), 1 to 100 in steps of 1 on its settings screen.
+pub const LARGE_STEP_DEFAULT: i32 = 10;
+pub const LARGE_STEP_MIN: i32 = 1;
+pub const LARGE_STEP_MAX: i32 = 100;
 
 /// Switch the Image duration value to the other unit, as the original's
 /// GlobalSettingDialogViewModel::ImageDefaultDurationUnitChanged (VECreator.dll 0x18182bb10) does:

@@ -32,6 +32,7 @@ no upload and no internet needed.
 - **Split, trim, move, duplicate and delete**, with snapping to clip edges and the playhead.
 - **Multi-select**: pick several clips and move or delete them together.
 - **Undo and redo** for every change.
+- **Image duration and big step** settings: how long pictures last when added (seconds or frames), and how far Shift + arrow moves the playhead.
 - **Timeline zoom** with the slider, Ctrl + mouse wheel, or Ctrl + plus/minus.
 - **Movable panels**: drag the panels into your own layout, save layouts by name and switch between them.
 
@@ -130,6 +131,7 @@ model in `whisper/models-general`. In **Menu → Settings** choose whether it ru
 | Ctrl + A | Select all |
 | Esc | Select nothing |
 | ← / → | One frame back / forward |
+| Shift + ← / → | Big step back / forward (10 frames; change it in Settings) |
 | Home / End | Go to the start / end |
 | K | Add or remove a keyframe |
 | T | Add a text at the playhead |

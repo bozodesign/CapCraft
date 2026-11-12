@@ -838,6 +838,14 @@ impl App {
                 }
             });
             ui.label(egui::RichText::new("How long a picture lasts when you add it to the timeline.").color(MUTED).size(11.0));
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                use crate::model::*;
+                ui.add_sized([110.0, 20.0], egui::Label::new(egui::RichText::new("Big step").color(MUTED)));
+                ui.add(egui::DragValue::new(&mut self.layouts.large_step).range(LARGE_STEP_MIN..=LARGE_STEP_MAX).speed(1.0));
+                ui.label(egui::RichText::new("frames").color(MUTED));
+            });
+            ui.label(egui::RichText::new("How far Shift + ← / → moves the playhead.").color(MUTED).size(11.0));
             ui.add_space(10.0);
             ui.separator();
             ui.label(egui::RichText::new("Auto captions").strong().size(14.0));
@@ -1813,6 +1821,7 @@ impl App {
                     ("Ctrl+Z", "Undo"),
                     ("Ctrl+Shift+Z / Ctrl+Y", "Redo"),
                     ("← / →", "One frame back / forward"),
+                    ("Shift + ← / →", "Big step back / forward (Settings)"),
                     ("Home / End", "Start / end"),
                     ("Ctrl+I", "Import media"),
                     ("Ctrl+S", "Save project"),
@@ -1850,6 +1859,7 @@ impl App {
                 c && i.key_pressed(Key::D),
                 i.key_pressed(Key::ArrowLeft),
                 i.key_pressed(Key::ArrowRight),
+                i.modifiers.shift,
                 i.key_pressed(Key::Home),
                 i.key_pressed(Key::End),
                 c && i.key_pressed(Key::I),
@@ -1863,7 +1873,7 @@ impl App {
                 c && i.key_pressed(Key::Minus),
             ]
         });
-        let [space, split, del, undo, redo, dup, left, right, home, end, imp, save, exp, key, text, all, esc, zin, zout] = keys;
+        let [space, split, del, undo, redo, dup, left, right, shift, home, end, imp, save, exp, key, text, all, esc, zin, zout] = keys;
         // timeline zoom in / out: twice as close or twice as far (the original's zoom steps)
         if zin {
             self.zoom_keep_playhead(self.tl_zoom * crate::timeline::ZOOM_STEP);
@@ -1895,11 +1905,13 @@ impl App {
         if dup {
             self.duplicate_selected();
         }
+        // one frame, or with Shift the big step from Settings
+        let step = if shift { self.layouts.large_step.clamp(crate::model::LARGE_STEP_MIN, crate::model::LARGE_STEP_MAX) as f64 } else { 1.0 };
         if left {
-            self.seek(((self.playhead * fps).round() - 1.0) / fps);
+            self.seek(((self.playhead * fps).round() - step).max(0.0) / fps);
         }
         if right {
-            self.seek(((self.playhead * fps).round() + 1.0) / fps);
+            self.seek(((self.playhead * fps).round() + step) / fps);
         }
         if home {
             self.seek(0.0);
