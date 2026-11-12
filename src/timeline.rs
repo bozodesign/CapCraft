@@ -310,6 +310,15 @@ impl App {
         pos2(view.x(clips[i + 1].start + tl / 2.0), row.rect.center().y)
     }
 
+    /// While the start of a main-track clip is being trimmed: the clip's place on the track and
+    /// how far it (and the clips after it) are drawn to the right of where the track packs them.
+    fn main_trim_shift(&self) -> Option<(usize, f64)> {
+        let d = self.tl_drag.as_ref().filter(|d| d.kind == DragKind::TrimL && d.main)?;
+        let (ti, ci) = self.project.find_clip(d.clip_id)?;
+        let dt = d.ghost - self.project.tracks[ti].clips[ci].start;
+        (dt.abs() > 1e-9).then_some((ci, dt))
+    }
+
     fn clip_rect(row: &Row, c: &Clip, view: View) -> Rect {
         Rect::from_min_max(pos2(view.x(c.start), row.rect.top() + 1.0), pos2(view.x(c.end()), row.rect.bottom() - 1.0))
     }
@@ -852,10 +861,24 @@ impl App {
             }
         }
         let dragging_main = self.tl_drag.as_ref().filter(|d| d.kind == DragKind::Move && d.main).map(|d| d.clip_id);
+        // trimming the start of a main-track clip: while the button is held its left edge follows
+        // the pointer (and snaps to the playhead) and the clips after it stay where they were;
+        // the track closes the gap when it's let go
+        let trim_shift = self.main_trim_shift();
         let picked = self.group();
         for row in &rows {
             let tr = &self.project.tracks[row.ti];
-            for c in &tr.clips {
+            for (ci, c) in tr.clips.iter().enumerate() {
+                let shifted;
+                let c = match trim_shift {
+                    Some((from, dt)) if row.kind == TrackKind::Main && ci >= from => {
+                        let mut s = c.clone();
+                        s.start += dt;
+                        shifted = s;
+                        &shifted
+                    }
+                    _ => c,
+                };
                 let r = Self::clip_rect(row, c, view);
                 if r.right() < content.left() || r.left() > content.right() {
                     continue;
@@ -866,7 +889,10 @@ impl App {
             }
             if row.kind == TrackKind::Main && tr.clips.len() > 1 {
                 for i in 0..tr.clips.len() - 1 {
-                    let jc = self.junction_center(row, view, i);
+                    let mut jc = self.junction_center(row, view, i);
+                    if let Some((_, dt)) = trim_shift.filter(|&(from, _)| i >= from) {
+                        jc.x += (dt * view.zoom as f64) as f32;
+                    }
                     if jc.x < content.left() - 10.0 || jc.x > content.right() + 10.0 {
                         continue;
                     }
@@ -1033,6 +1059,8 @@ impl App {
                 if !d.main {
                     delta = delta.max(-o.start);
                 }
+                // where the left edge is shown while the button is held
+                d.ghost = o.start + delta;
                 if let Some(c) = self.project.clip_mut(id) {
                     if has_len {
                         c.src_in = (o.src_in + delta * o.speed).max(0.0);
