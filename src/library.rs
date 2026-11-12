@@ -295,6 +295,7 @@ impl App {
         let mut changed = false;
         let mut remove = None;
         let mut use_it = None;
+        let mut drag_it = None;
         let filter = self.mylib_filter;
         // a grid of cards, like Media
         let shown: Vec<usize> = (0..self.mylib.len()).filter(|&i| filter.is_none_or(|f| f == self.mylib[i].cat)).collect();
@@ -355,6 +356,9 @@ impl App {
                     if resp.double_clicked() && ok {
                         use_it = Some(i);
                     }
+                    if resp.drag_started() && ok {
+                        drag_it = Some(i);
+                    }
                     resp.context_menu(|ui| {
                         if ui.add_enabled(ok, egui::Button::new("Use")).on_hover_text(it.cat.use_hint()).clicked() {
                             ui.close_menu();
@@ -374,7 +378,7 @@ impl App {
                         }
                     });
                     let tip = if ok {
-                        format!("{}\nClick + or double-click to use it ({}). Right-click to change its kind or remove it.", it.path, it.cat.use_hint().to_lowercase())
+                        format!("{}\nDrag it to the timeline, or click + or double-click to use it ({}). Right-click to change its kind or remove it.", it.path, it.cat.use_hint().to_lowercase())
                     } else {
                         format!("{}\nFile not found: it was moved or deleted. Right-click to remove it.", it.path)
                     };
@@ -392,6 +396,13 @@ impl App {
         if let Some(i) = use_it {
             let it = self.mylib[i].clone();
             self.use_mine(&ctx, &it);
+        }
+        // dragged out: brought into the project now, then dropped like a Media file
+        if let Some(i) = drag_it {
+            let path = self.mylib[i].path.clone();
+            if let Some(id) = self.media_for_path(&ctx, &path) {
+                self.lib_drag = Some(LibItem::Media(id));
+            }
         }
     }
 

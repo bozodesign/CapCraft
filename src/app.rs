@@ -103,6 +103,9 @@ pub struct App {
     pub snapping: bool,
     pub tl_drag: Option<crate::timeline::TlDrag>,
     pub lib_drag: Option<LibItem>,
+    /// The time under the mouse while it is over the timeline (the original's preview axis):
+    /// the player shows that frame while not playing.
+    pub tl_hover_t: Option<f64>,
     pub timeline_rect: Rect,
     pub preview_rect: Rect,
 
@@ -354,6 +357,7 @@ impl App {
             snapping: true,
             tl_drag: None,
             lib_drag: None,
+            tl_hover_t: None,
             timeline_rect: Rect::NOTHING,
             preview_rect: Rect::NOTHING,
             thumbs: HashMap::new(),
@@ -556,6 +560,7 @@ impl App {
     pub fn replace_project(&mut self, p: Project) {
         self.stop();
         self.project = p;
+        self.project.sound_files_as_sound();
         self.project.relayout();
         self.project_path = None;
         self.playhead = 0.0;
@@ -648,6 +653,38 @@ impl App {
         }
     }
 
+    /// Add media to the project. Media isn't part of undo, so it goes in every snapshot too.
+    fn add_media_record(&mut self, m: Media) {
+        for snap in self.undo.iter_mut().chain(self.redo.iter_mut()) {
+            snap.media.push(m.clone());
+        }
+        self.committed.media.push(m.clone());
+        self.last_frame.media.push(m.clone());
+        self.project.media.push(m);
+    }
+
+    /// The project's media for a file, bringing it in now if it isn't there yet (used when a
+    /// My library file starts being dragged, so it can be dropped on the timeline like Media).
+    /// Its thumbnails and sound load in the background as usual.
+    pub fn media_for_path(&mut self, ctx: &egui::Context, path: &str) -> Option<u64> {
+        if let Some(id) = self.project.media.iter().find(|m| crate::mylib::same_path(&m.path, path)).map(|m| m.id) {
+            return Some(id);
+        }
+        let id = self.project.new_id();
+        match media::probe(id, std::path::Path::new(path)) {
+            Ok(m) => {
+                self.add_media_record(m.clone());
+                let (pending, pcm, ctx) = (self.pending.clone(), self.pcm.clone(), ctx.clone());
+                std::thread::spawn(move || load_extras(&m, &pending, &pcm, &ctx));
+                Some(id)
+            }
+            Err(e) => {
+                self.notify(e);
+                None
+            }
+        }
+    }
+
     fn reload_media_extras(&mut self, ctx: &egui::Context) {
         for m in self.project.media.clone() {
             if m.kind == MediaKind::Color {
@@ -668,13 +705,11 @@ impl App {
                     self.loading = self.loading.saturating_sub(1);
                     let add = m.fps < 0.0;
                     m.fps = m.fps.abs();
-                    // media isn't part of undo: put it in every snapshot
-                    for snap in self.undo.iter_mut().chain(self.redo.iter_mut()) {
-                        snap.media.push(m.clone());
+                    // already brought in when it was dragged from My library
+                    if self.project.media(m.id).is_some() {
+                        continue;
                     }
-                    self.committed.media.push(m.clone());
-                    self.last_frame.media.push(m.clone());
-                    self.project.media.push(m.clone());
+                    self.add_media_record(m.clone());
                     self.lib_selected = Some(m.id);
                     if add {
                         self.add_media_at_playhead(m.id);
@@ -1450,6 +1485,7 @@ impl App {
             Ok(proj) => {
                 self.stop();
                 self.project = proj;
+                self.project.sound_files_as_sound();
                 self.project.relayout();
                 self.project_path = Some(p.to_path_buf());
                 self.undo.clear();
@@ -2017,7 +2053,12 @@ impl App {
 
     fn render_preview(&mut self, ctx: &egui::Context, pw: usize, ph: usize) {
         let fps = self.project.fps;
-        let tq = (self.playhead * fps + 1e-6).floor() as i64;
+        // the mouse over the timeline shows the frame under it (the playhead stays put)
+        let at = match (self.playing, self.tl_hover_t) {
+            (false, Some(h)) => h,
+            _ => self.playhead,
+        };
+        let tq = (at * fps + 1e-6).floor() as i64;
         let arrived = FRAMES_ARRIVED.load(Ordering::Relaxed);
         let key = (tq, self.revision, arrived, pw, ph);
         if key == self.preview_key && self.preview_tex.is_some() {

@@ -1452,6 +1452,38 @@ impl Project {
 
     /// Pack the main track end to end (overlapping by each transition) and keep
     /// the canvas size in step with the ratio.
+    /// Sound files read as videos by an earlier version (an .mp3 with a cover picture) become
+    /// sound again, and their clips move from the picture tracks to sound tracks, keeping their
+    /// times. True when anything changed.
+    pub fn sound_files_as_sound(&mut self) -> bool {
+        let mut fixed = vec![];
+        for m in self.media.iter_mut() {
+            if m.kind == MediaKind::Video && !m.path.is_empty() && crate::media::kind_from_path(std::path::Path::new(&m.path)) == MediaKind::Audio {
+                m.kind = MediaKind::Audio;
+                m.has_audio = true;
+                m.width = 0;
+                m.height = 0;
+                fixed.push(m.id);
+            }
+        }
+        if fixed.is_empty() {
+            return false;
+        }
+        let mut moved = vec![];
+        for tr in self.tracks.iter_mut().filter(|t| t.kind != TrackKind::Audio) {
+            let (go, keep): (Vec<Clip>, Vec<Clip>) = tr.clips.drain(..).partition(|c| c.media.map(|m| fixed.contains(&m)).unwrap_or(false));
+            tr.clips = keep;
+            for mut c in go {
+                c.transition = None;
+                moved.push(c);
+            }
+        }
+        for c in moved {
+            self.place_free(TrackKind::Audio, c);
+        }
+        true
+    }
+
     pub fn relayout(&mut self) {
         let mi = self.main_index();
         if let Some(main) = self.tracks.get_mut(mi) {
@@ -1620,5 +1652,25 @@ mod case_tests {
         assert_eq!(TextCase::Title.apply("\u{e2a}\u{e27}\u{e31}\u{e2a} hello"), "\u{e2a}\u{e27}\u{e31}\u{e2a} Hello");
         assert_eq!(TextCase::Upper.apply("stra\u{df}e").chars().count(), 6, "never longer than typed");
         assert_eq!(TextCase::None.apply("MiXed"), "MiXed");
+    }
+
+    #[test]
+    fn a_song_read_as_a_video_moves_to_a_sound_track() {
+        let mut p = Project::new("t");
+        let media = |id, path: &str, kind| Media { id, kind, path: path.into(), name: path.into(), duration: 4.0, width: 300, height: 300, has_audio: true, fps: 30.0, color: [0; 4], color2: [0; 4] };
+        p.media.push(media(1, "C:/x/clip.mp4", MediaKind::Video));
+        p.media.push(media(2, "C:/x/song.mp3", MediaKind::Video));
+        let mi = p.main_index();
+        p.tracks[mi].clips.push(Clip::new(10, Some(1), 0.0, 4.0));
+        p.tracks[mi].clips.push(Clip::new(11, Some(2), 4.0, 4.0));
+        assert!(p.sound_files_as_sound());
+        p.relayout();
+        assert_eq!(p.media(2).unwrap().kind, MediaKind::Audio);
+        assert_eq!(p.tracks[p.main_index()].clips.iter().map(|c| c.id).collect::<Vec<_>>(), vec![10]);
+        let (ti, _) = p.find_clip(11).unwrap();
+        assert_eq!(p.tracks[ti].kind, TrackKind::Audio);
+        assert_eq!(p.clip(11).unwrap().start, 4.0);
+        // nothing left to fix the second time
+        assert!(!p.sound_files_as_sound());
     }
 }

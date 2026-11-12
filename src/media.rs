@@ -135,7 +135,7 @@ pub fn probe(id: u64, path: &Path) -> Result<Media, String> {
             "-v",
             "error",
             "-show_entries",
-            "stream=codec_type,width,height,r_frame_rate,avg_frame_rate,duration:stream_side_data=rotation:stream_tags=rotate:format=duration",
+            "stream=codec_type,width,height,r_frame_rate,avg_frame_rate,duration:stream_disposition=attached_pic:stream_side_data=rotation:stream_tags=rotate:format=duration",
             "-of",
             "json",
         ])
@@ -152,6 +152,8 @@ pub fn probe(id: u64, path: &Path) -> Result<Media, String> {
     if let Some(streams) = v["streams"].as_array() {
         for s in streams {
             match s["codec_type"].as_str() {
+                // a sound file's cover picture is stored as a one-frame "video": it stays sound
+                Some("video") if s["disposition"]["attached_pic"].as_i64() == Some(1) => {}
                 Some("video") if !has_video => {
                     has_video = true;
                     width = s["width"].as_u64().unwrap_or(0) as u32;
@@ -184,7 +186,12 @@ pub fn probe(id: u64, path: &Path) -> Result<Media, String> {
     if !has_video && !has_audio {
         return Err(format!("{name} has no picture or sound"));
     }
-    let kind = if has_video && width > 0 { MediaKind::Video } else { MediaKind::Audio };
+    // .mp3, .wav and the other sound files are always sound, whatever else they carry
+    let kind = if has_video && width > 0 && kind != MediaKind::Audio { MediaKind::Video } else { MediaKind::Audio };
+    if kind == MediaKind::Audio {
+        width = 0;
+        height = 0;
+    }
     // a single-frame "video" (cover art) counts as sound
     if duration <= 0.0 {
         duration = 1.0;

@@ -178,6 +178,27 @@ fn ratio_from_zoom(z: f32, start: usize, low: f32) -> f64 {
     1.0
 }
 const RULER_H: f32 = 26.0;
+
+/// The original's preview axis (MainTimeLineAxis `timelinePreviewAxis` in the timeline QML): a
+/// line that follows the mouse across the ruler and the tracks, 2 px wide, dashed 1 on 3 off
+/// (in line widths), in LVColor.State_Warning_Default (FusionUI 0x180020540: #D4A500). Over the
+/// ruler, the frame under it is marked in LVColor.White1A (0x180024be0: #1FFAFAFA).
+const AXIS_W: f32 = 2.0;
+const AXIS_DASH: [f32; 2] = [1.0, 3.0];
+const AXIS_COLOR: Color32 = Color32::from_rgb(0xD4, 0xA5, 0x00);
+// #1FFAFAFA (alpha 0x1F over 0xFA) stored premultiplied: 0xFA * 0x1F / 255 = 30
+const AXIS_MASK: Color32 = Color32::from_rgba_premultiplied(30, 30, 30, 0x1F);
+
+/// The original's timeline scroll bar (ScrollBar.horizontal of `timeLineFlicker`): always shown,
+/// a handle 6 px tall with fully rounded ends, never shorter than 25 px, in
+/// LVColor.Transparency_White_012 (0x180023740: #1FFFFFFF), LVColor.Grey3 (0x18001db00: #999999)
+/// while the mouse is on it.
+const SCROLL_HANDLE_H: f32 = 6.0;
+const SCROLL_HANDLE_MIN: f32 = 25.0;
+const SCROLL_PAD: f32 = 2.0;
+// #1FFFFFFF stored premultiplied: white at alpha 0x1F is 0x1F in every channel
+const SCROLL_NORMAL: Color32 = Color32::from_rgba_premultiplied(0x1F, 0x1F, 0x1F, 0x1F);
+const SCROLL_HOVER: Color32 = Color32::from_rgb(0x99, 0x99, 0x99);
 const ROW_GAP: f32 = 6.0;
 
 fn row_h(k: TrackKind) -> f32 {
@@ -696,8 +717,10 @@ impl App {
         ui.allocate_rect(full, Sense::hover());
         self.timeline_rect = full;
         let ruler = Rect::from_min_max(pos2(full.left() + HEADER_W, full.top()), pos2(full.right(), full.top() + RULER_H));
-        let content = Rect::from_min_max(pos2(full.left() + HEADER_W, full.top() + RULER_H), full.max);
-        let header = Rect::from_min_max(pos2(full.left(), full.top() + RULER_H), pos2(full.left() + HEADER_W, full.bottom()));
+        let bar_h = SCROLL_HANDLE_H + SCROLL_PAD * 2.0;
+        let content = Rect::from_min_max(pos2(full.left() + HEADER_W, full.top() + RULER_H), pos2(full.right(), full.bottom() - bar_h));
+        let header = Rect::from_min_max(pos2(full.left(), full.top() + RULER_H), pos2(full.left() + HEADER_W, full.bottom() - bar_h));
+        let bar = Rect::from_min_max(pos2(content.left(), content.bottom()), pos2(full.right(), full.bottom()));
         let area = ruler.union(content);
         let fps = self.project.fps;
 
@@ -726,6 +749,25 @@ impl App {
         let visible = (content.width() / self.tl_zoom) as f64;
         let max_scroll = (self.project.duration() + visible * 0.5 - visible).max(0.0) + visible * 0.5;
         self.tl_scroll = self.tl_scroll.clamp(0.0, max_scroll.max(0.0));
+
+        // ---- the scroll bar under the tracks: its handle is the part of the timeline in view
+        let span = max_scroll.max(0.0) + visible;
+        let handle_w = ((visible / span.max(1e-9)) as f32 * bar.width()).clamp(SCROLL_HANDLE_MIN.min(bar.width()), bar.width());
+        let travel = (bar.width() - handle_w).max(0.0);
+        let handle_x = |scroll: f64| bar.left() + if max_scroll > 0.0 { (scroll / max_scroll) as f32 * travel } else { 0.0 };
+        let bar_resp = ui.interact(bar, ui.id().with("tl_scrollbar"), Sense::click_and_drag());
+        if travel > 0.0 {
+            if bar_resp.dragged() {
+                self.tl_scroll = (self.tl_scroll + (bar_resp.drag_delta().x / travel) as f64 * max_scroll).clamp(0.0, max_scroll);
+            } else if bar_resp.clicked() {
+                // a click beside the handle brings that part into view
+                if let Some(p) = bar_resp.interact_pointer_pos() {
+                    let f = ((p.x - bar.left() - handle_w / 2.0) / travel).clamp(0.0, 1.0);
+                    self.tl_scroll = f as f64 * max_scroll;
+                }
+            }
+        }
+        let on_bar = bar_resp.hovered() || bar_resp.dragged();
 
         // follow the playhead while playing
         if self.playing {
@@ -881,8 +923,16 @@ impl App {
                             }
                         }
                     }
-                    Hit::Edge(id, _) | Hit::Clip(id) if ctrl => self.toggle_pick(id),
-                    Hit::Edge(id, _) | Hit::Clip(id) | Hit::VolPoint(id, _) | Hit::VolLine(id) | Hit::Fade(id, _) => self.pick(vec![id]),
+                    Hit::Edge(id, _) | Hit::Clip(id) if ctrl => {
+                        self.toggle_pick(id);
+                        self.seek(view.t(p.x).max(0.0));
+                    }
+                    // a click on a clip picks it and brings the playhead to where it was clicked
+                    Hit::Edge(id, _) | Hit::Clip(id) => {
+                        self.pick(vec![id]);
+                        self.seek(view.t(p.x).max(0.0));
+                    }
+                    Hit::VolPoint(id, _) | Hit::VolLine(id) | Hit::Fade(id, _) => self.pick(vec![id]),
                     Hit::Empty => {
                         if !ctrl {
                             self.pick(vec![]);
@@ -1205,6 +1255,27 @@ impl App {
             let head = vec![pos2(px - 6.0, ruler.top() + 2.0), pos2(px + 6.0, ruler.top() + 2.0), pos2(px + 6.0, ruler.top() + 10.0), pos2(px, ruler.top() + 16.0), pos2(px - 6.0, ruler.top() + 10.0)];
             painter.add(egui::Shape::convex_polygon(head, PLAYHEAD, Stroke::NONE));
         }
+
+        // the preview axis: a dashed line following the mouse; the player shows its frame
+        let axis = hover.filter(|p| area.contains(*p) && !on_bar).filter(|_| self.tl_drag.is_none() && self.lib_drag.is_none() && !self.playing);
+        self.tl_hover_t = axis.map(|p| view.t(p.x).max(0.0));
+        if let Some(t) = self.tl_hover_t {
+            let x = view.x(t);
+            // over the ruler, the frame (one short tick) it is in, when the ruler counts frames
+            let (_, _, frames, steps) = RULER_LEVELS[ruler_level(view.zoom)];
+            if frames > 0 {
+                let minor = frames as f64 / fps.max(1.0) / steps.max(1) as f64;
+                let t0 = (t / minor).floor() * minor;
+                let m = Rect::from_min_max(pos2(view.x(t0), ruler.top()), pos2(view.x(t0 + minor), ruler.bottom()));
+                painter.rect_filled(m, 0.0, AXIS_MASK);
+            }
+            painter.add(egui::Shape::dashed_line(&[pos2(x, ruler.top()), pos2(x, content.bottom())], Stroke::new(AXIS_W, AXIS_COLOR), AXIS_DASH[0] * AXIS_W, AXIS_DASH[1] * AXIS_W));
+        }
+
+        // the scroll bar
+        let bp = ui.painter_at(bar);
+        let handle = Rect::from_min_size(pos2(handle_x(self.tl_scroll), bar.center().y - SCROLL_HANDLE_H / 2.0), vec2(handle_w, SCROLL_HANDLE_H));
+        bp.rect_filled(handle, SCROLL_HANDLE_H / 2.0, if on_bar { SCROLL_HOVER } else { SCROLL_NORMAL });
 
         self.draw_headers(ui, header, &rows);
     }
