@@ -89,6 +89,42 @@ pub fn fade_limit(dur: f64) -> f32 {
 pub const IMAGE_DEFAULT_LEN: f64 = 5.0;
 pub const TEXT_DEFAULT_LEN: f64 = 3.0;
 
+/// The "Image duration" setting, as the original's settings screen limits it: in seconds
+/// 0.1 to 100 in steps of 0.1 (one decimal), in frames 1 to 3000 in steps of 1.
+pub const IMAGE_SECONDS_MIN: f64 = 0.1;
+pub const IMAGE_SECONDS_MAX: f64 = 100.0;
+pub const IMAGE_SECONDS_STEP: f64 = 0.1;
+pub const IMAGE_FRAMES_MIN: f64 = 1.0;
+pub const IMAGE_FRAMES_MAX: f64 = 3000.0;
+/// The frames value before the person sets one: the 5 s default at 30 fps (estimated).
+pub const IMAGE_FRAMES_DEFAULT: i32 = 150;
+
+/// Switch the Image duration value to the other unit, as the original's
+/// GlobalSettingDialogViewModel::ImageDefaultDurationUnitChanged (VECreator.dll 0x18182bb10) does:
+/// the frame rate is cut to whole frames per second, frames become seconds kept to a tenth
+/// (round(frames / fps * 10) / 10), seconds become whole frames (round(seconds * fps)), and the
+/// result is held between the new unit's lowest and highest value.
+pub fn image_unit_switch(to_seconds: bool, cur: f64, min: f64, max: f64, fps: f64) -> f64 {
+    let whole = (fps.trunc()).max(1.0);
+    let v = if to_seconds { (cur / whole * 10.0).round() / 10.0 } else { (whole * cur).round() };
+    if min > v {
+        min
+    } else if v > max {
+        max
+    } else {
+        v
+    }
+}
+
+/// How long an added picture lasts with the person's Image duration setting.
+pub fn image_len(unit_frames: bool, secs: f64, frames: i32, fps: f64) -> f64 {
+    if unit_frames {
+        (frames as f64).clamp(IMAGE_FRAMES_MIN, IMAGE_FRAMES_MAX) / fps.max(1.0)
+    } else {
+        secs.clamp(IMAGE_SECONDS_MIN, IMAGE_SECONDS_MAX)
+    }
+}
+
 /// Caption size and height for a canvas (makeBaseTextSegParam rule).
 pub fn caption_defaults(w: u32, h: u32) -> (f32, f32) {
     if w >= h {
@@ -1552,6 +1588,21 @@ pub fn short_time(t: f64) -> String {
 #[cfg(test)]
 mod case_tests {
     use super::*;
+
+    #[test]
+    fn image_duration_switches_units_like_the_original() {
+        // 5 s at 30 fps is 150 frames and back
+        assert_eq!(image_unit_switch(false, 5.0, IMAGE_FRAMES_MIN, IMAGE_FRAMES_MAX, 30.0), 150.0);
+        assert_eq!(image_unit_switch(true, 150.0, IMAGE_SECONDS_MIN, IMAGE_SECONDS_MAX, 30.0), 5.0);
+        // 29.97 fps counts as 29 whole frames; seconds keep one decimal
+        assert_eq!(image_unit_switch(false, 2.0, IMAGE_FRAMES_MIN, IMAGE_FRAMES_MAX, 29.97), 58.0);
+        assert_eq!(image_unit_switch(true, 47.0, IMAGE_SECONDS_MIN, IMAGE_SECONDS_MAX, 30.0), 1.6);
+        // held between the new unit's limits
+        assert_eq!(image_unit_switch(false, 100.0, IMAGE_FRAMES_MIN, IMAGE_FRAMES_MAX, 60.0), 3000.0);
+        assert_eq!(image_unit_switch(true, 1.0, IMAGE_SECONDS_MIN, IMAGE_SECONDS_MAX, 60.0), 0.1);
+        assert_eq!(image_len(true, 5.0, 60, 30.0), 2.0);
+        assert_eq!(image_len(false, 7.5, 60, 30.0), 7.5);
+    }
 
     #[test]
     fn letter_case_keeps_the_typed_text_and_one_letter_per_letter() {

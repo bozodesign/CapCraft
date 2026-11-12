@@ -93,6 +93,13 @@ struct LayoutFile {
     speech_language: String,
     #[serde(default)]
     speech_music: bool,
+    /// Image duration: unit "s" or "f" (as the original keeps it), seconds and frames.
+    #[serde(default)]
+    image_unit: String,
+    #[serde(default)]
+    image_secs: Option<f64>,
+    #[serde(default)]
+    image_frames: Option<i32>,
 }
 
 pub struct Layouts {
@@ -112,6 +119,10 @@ pub struct Layouts {
     pub speech_model: String,
     pub speech_language: String,
     pub speech_music: bool,
+    /// How long an added picture lasts (Settings): in frames instead of seconds, and each value.
+    pub image_frames_unit: bool,
+    pub image_secs: f64,
+    pub image_frames: i32,
     written: String,
     checked: Instant,
     /// Screenshot runs never write the person's layout file.
@@ -127,13 +138,13 @@ impl Layouts {
         let f: LayoutFile = std::fs::read_to_string(file()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         let dock = f.current.filter(complete).unwrap_or_else(|| preset(0));
         let saved = f.saved.into_iter().filter(|(_, d)| complete(d)).collect();
-        let mut l = Layouts { dock: Some(dock), saved, new_name: String::new(), phone_overlay: f.phone_overlay.min(3), safe_area: f.safe_area, channel_name: f.channel_name, avatar_path: f.avatar_path, speech_gpu: !f.speech_cpu, speech_model: f.speech_model, speech_language: if f.speech_language.is_empty() { "auto".into() } else { f.speech_language }, speech_music: f.speech_music, written: String::new(), checked: Instant::now(), readonly: false };
+        let mut l = Layouts { dock: Some(dock), saved, new_name: String::new(), phone_overlay: f.phone_overlay.min(3), safe_area: f.safe_area, channel_name: f.channel_name, avatar_path: f.avatar_path, speech_gpu: !f.speech_cpu, speech_model: f.speech_model, speech_language: if f.speech_language.is_empty() { "auto".into() } else { f.speech_language }, speech_music: f.speech_music, image_frames_unit: f.image_unit == "f", image_secs: f.image_secs.unwrap_or(crate::model::IMAGE_DEFAULT_LEN), image_frames: f.image_frames.unwrap_or(crate::model::IMAGE_FRAMES_DEFAULT), written: String::new(), checked: Instant::now(), readonly: false };
         l.written = l.json();
         l
     }
 
     fn json(&self) -> String {
-        let f = LayoutFile { current: self.dock.clone(), saved: self.saved.clone(), phone_overlay: self.phone_overlay, safe_area: self.safe_area, channel_name: self.channel_name.clone(), avatar_path: self.avatar_path.clone(), speech_cpu: !self.speech_gpu, speech_model: self.speech_model.clone(), speech_language: self.speech_language.clone(), speech_music: self.speech_music };
+        let f = LayoutFile { current: self.dock.clone(), saved: self.saved.clone(), phone_overlay: self.phone_overlay, safe_area: self.safe_area, channel_name: self.channel_name.clone(), avatar_path: self.avatar_path.clone(), speech_cpu: !self.speech_gpu, speech_model: self.speech_model.clone(), speech_language: self.speech_language.clone(), speech_music: self.speech_music, image_unit: if self.image_frames_unit { "f".into() } else { "s".into() }, image_secs: Some(self.image_secs), image_frames: Some(self.image_frames) };
         serde_json::to_string_pretty(&f).unwrap_or_default()
     }
 

@@ -670,11 +670,13 @@ impl App {
         id
     }
 
-    fn default_len(m: &Media) -> f64 {
+    /// A video or sound lasts its own length; a picture lasts the Image duration from Settings.
+    fn default_len(&self, m: &Media) -> f64 {
         if m.has_length() {
             m.duration
         } else {
-            IMAGE_DEFAULT_LEN
+            let l = &self.layouts;
+            crate::model::image_len(l.image_frames_unit, l.image_secs, l.image_frames, self.project.fps)
         }
     }
 
@@ -687,7 +689,7 @@ impl App {
     pub fn add_media_at(&mut self, media_id: u64, kind: Option<TrackKind>, t: f64) {
         let Some(m) = self.project.media(media_id).cloned() else { return };
         let id = self.project.new_id();
-        let mut c = Clip::new(id, Some(media_id), t.max(0.0), Self::default_len(&m));
+        let mut c = Clip::new(id, Some(media_id), t.max(0.0), self.default_len(&m));
         let kind = match (m.kind, kind) {
             (MediaKind::Audio, _) => TrackKind::Audio,
             (_, Some(TrackKind::Overlay)) | (_, Some(TrackKind::Text)) => TrackKind::Overlay,
@@ -807,6 +809,35 @@ impl App {
             if !self.layouts.avatar_path.is_empty() && pic.is_none() {
                 ui.label(egui::RichText::new("That picture can't be opened (moved or deleted?).").color(Color32::from_rgb(240, 170, 80)).size(11.0));
             }
+            ui.add_space(10.0);
+            ui.separator();
+            ui.label(egui::RichText::new("Editing").strong().size(14.0));
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                use crate::model::*;
+                ui.add_sized([110.0, 20.0], egui::Label::new(egui::RichText::new("Image duration").color(MUTED)));
+                let l = &mut self.layouts;
+                if l.image_frames_unit {
+                    ui.add(egui::DragValue::new(&mut l.image_frames).range(IMAGE_FRAMES_MIN as i32..=IMAGE_FRAMES_MAX as i32).speed(1.0));
+                } else {
+                    ui.add(egui::DragValue::new(&mut l.image_secs).range(IMAGE_SECONDS_MIN..=IMAGE_SECONDS_MAX).speed(IMAGE_SECONDS_STEP).fixed_decimals(1));
+                }
+                let was = l.image_frames_unit;
+                egui::ComboBox::from_id_salt("image-unit").width(70.0).selected_text(if was { "frames" } else { "seconds" }).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut l.image_frames_unit, false, "seconds");
+                    ui.selectable_value(&mut l.image_frames_unit, true, "frames");
+                });
+                if l.image_frames_unit != was {
+                    // the value follows to the new unit, as in the original
+                    let fps = self.project.fps;
+                    if l.image_frames_unit {
+                        l.image_frames = image_unit_switch(false, l.image_secs, IMAGE_FRAMES_MIN, IMAGE_FRAMES_MAX, fps) as i32;
+                    } else {
+                        l.image_secs = image_unit_switch(true, l.image_frames as f64, IMAGE_SECONDS_MIN, IMAGE_SECONDS_MAX, fps);
+                    }
+                }
+            });
+            ui.label(egui::RichText::new("How long a picture lasts when you add it to the timeline.").color(MUTED).size(11.0));
             ui.add_space(10.0);
             ui.separator();
             ui.label(egui::RichText::new("Auto captions").strong().size(14.0));
