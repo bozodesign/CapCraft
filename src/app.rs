@@ -183,16 +183,23 @@ pub const PREROLL_SECONDS: f64 = 1.5;
 /// Where a clip goes in on the main track for a time: counted on the track as it closes up
 /// without the clip being moved (`skip`), so it matches the gap shown while dragging. Past the
 /// middle of a clip goes in after it.
-pub fn main_slot(clips: &[Clip], t: f64, skip: Option<u64>) -> usize {
+///
+/// The original's rule (DraftQuery::find_target_index_to_insert 0x181088070): the place is the
+/// first clip whose middle (start + duration / 2) is not before the time, the two compared on
+/// whole frames (compareAlignTimeByFps 0x180f68bc0: each time is rounded to the nearest frame,
+/// 0x180f69290 / 0x180f693e0), so a pointer in the same frame as the middle still goes in before
+/// that clip. Past the last clip it goes at the end.
+pub fn main_slot(clips: &[Clip], t: f64, skip: Option<u64>, fps: f64) -> usize {
+    let frame = |x: f64| (x * fps.max(1.0)).round();
+    let ft = frame(t);
     let mut at = 0.0;
-    let mut n = 0;
-    for c in clips.iter().filter(|c| Some(c.id) != skip) {
-        if at + c.duration / 2.0 < t {
-            n += 1;
+    for (n, c) in clips.iter().filter(|c| Some(c.id) != skip).enumerate() {
+        if ft <= frame(at + c.duration / 2.0) {
+            return n;
         }
         at += c.duration;
     }
-    n
+    clips.iter().filter(|c| Some(c.id) != skip).count()
 }
 
 #[cfg(test)]
@@ -204,12 +211,16 @@ mod slot_tests {
         let clips = vec![Clip::new(1, None, 0.0, 2.0), Clip::new(2, None, 2.0, 2.0), Clip::new(3, None, 4.0, 2.0)];
         // the first clip taken out, the others close up to 0-2 and 2-4: 2.5 s is past the
         // middle of the second clip, so it goes in after it
-        assert_eq!(main_slot(&clips, 2.5, Some(1)), 1);
-        assert_eq!(main_slot(&clips, 0.5, Some(1)), 0);
-        assert_eq!(main_slot(&clips, 9.0, Some(1)), 2);
+        assert_eq!(main_slot(&clips, 2.5, Some(1), 30.0), 1);
+        assert_eq!(main_slot(&clips, 0.5, Some(1), 30.0), 0);
+        assert_eq!(main_slot(&clips, 9.0, Some(1), 30.0), 2);
         // nothing taken out: the track as it is
-        assert_eq!(main_slot(&clips, 2.5, None), 1);
-        assert_eq!(main_slot(&clips, 3.5, None), 2);
+        assert_eq!(main_slot(&clips, 2.5, None, 30.0), 1);
+        assert_eq!(main_slot(&clips, 3.5, None, 30.0), 2);
+        // in the same frame as a middle (3.0 s) still goes in before that clip, as in the original;
+        // one frame past it goes in after
+        assert_eq!(main_slot(&clips, 3.01, None, 30.0), 1);
+        assert_eq!(main_slot(&clips, 3.0 + 1.0 / 30.0, None, 30.0), 2);
     }
 }
 
@@ -730,7 +741,7 @@ impl App {
         // counted on the main track as it closes up without the clip being moved, so the place
         // matches the gap shown while dragging: past the middle of a clip goes in after it
         let mi = self.project.main_index();
-        main_slot(&self.project.tracks[mi].clips, t, skip)
+        main_slot(&self.project.tracks[mi].clips, t, skip, self.project.fps)
     }
 
     pub fn add_media_at(&mut self, media_id: u64, kind: Option<TrackKind>, t: f64) {
