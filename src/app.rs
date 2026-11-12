@@ -59,6 +59,8 @@ pub struct ExportDialog {
     pub res: usize,
     pub fps: usize,
     pub quality: export::Quality,
+    /// The project's own frame rate among the offered ones (the export starts there).
+    pub project_fps: Option<usize>,
     pub kbps: u32,
     pub constant: bool,
     pub audio: bool,
@@ -1669,7 +1671,8 @@ impl App {
     pub fn open_export(&mut self) {
         if self.export_dialog.is_none() {
             let folder = std::env::var("USERPROFILE").map(|h| PathBuf::from(h).join("Videos")).unwrap_or_else(|_| PathBuf::from("."));
-            self.export_dialog = Some(ExportDialog { name: self.project.name.clone(), folder, res: 2, fps: 2, quality: export::Quality::Recommended, kbps: export::CUSTOM_KBPS_DEFAULT, constant: false, audio: true, audio_kbps: 0 });
+            let project_fps = export::frame_rate_index(self.project.fps);
+            self.export_dialog = Some(ExportDialog { name: self.project.name.clone(), folder, res: 2, fps: project_fps.unwrap_or(export::FRAME_RATE_FALLBACK), project_fps, quality: export::Quality::Recommended, kbps: export::CUSTOM_KBPS_DEFAULT, constant: false, audio: true, audio_kbps: 0 });
         }
     }
 
@@ -1750,6 +1753,12 @@ impl App {
                     }
                 });
                 ui.end_row();
+                // as the original: a note when the export's frame rate isn't the project's
+                if let Some(p) = d.project_fps.filter(|&p| p != d.fps) {
+                    ui.label("");
+                    ui.label(egui::RichText::new(format!("Not the project's frame rate ({} fps): motion may look less smooth.", export::FRAME_RATES[p])).color(MUTED).size(11.0));
+                    ui.end_row();
+                }
                 ui.label("Quality");
                 egui::ComboBox::from_id_salt("q").selected_text(d.quality.name()).show_ui(ui, |ui| {
                     for q in export::Quality::ALL {
@@ -2458,6 +2467,7 @@ impl App {
                 self.open_export();
                 if let Some(d) = &mut self.export_dialog {
                     d.quality = export::Quality::Custom;
+                    d.fps = export::FRAME_RATES.len() - 1;
                 }
             }
             // CUTSTUDIO_SHOT_PICK=1: every other clip picked together (a self-check)

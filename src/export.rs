@@ -43,7 +43,9 @@ impl Quality {
 
 /// Lowest custom bitrate, in kbps: the original's export screen raises anything under 1000 to 1000.
 pub const CUSTOM_KBPS_MIN: u32 = 1000;
-/// A custom bitrate before the person types one (estimated).
+/// A custom bitrate before the person types one: 10 Mbit/s, the bitrate the original's
+/// OnlineBitRateManager::getBitRate (VECreator.dll 0x18450e740) falls back to when no setting
+/// has one ("use defult bit rate": the constant 10.0 at 0x18ef68e00, taken as Mbit/s).
 pub const CUSTOM_KBPS_DEFAULT: u32 = 10000;
 
 /// Highest custom bitrate for an export height, in kbps, as the original's export view model
@@ -78,8 +80,20 @@ pub fn rate_args(s: &Settings) -> Vec<String> {
     a
 }
 
+/// Export heights and frame rates offered, as the original's tables in VECreator.dll:
+/// heights 480, 720, 1080, 1440, 2160 at 0x18caeb5c0 and frame rates 24, 25, 30, 50, 60 at
+/// 0x18caeb5d8 (both read by the export bitrate code at 0x18450ebb0).
 pub const RESOLUTIONS: [(&str, u32); 5] = [("480p", 480), ("720p", 720), ("1080p", 1080), ("2K", 1440), ("4K", 2160)];
 pub const FRAME_RATES: [f64; 5] = [24.0, 25.0, 30.0, 50.0, 60.0];
+/// Frame rate offered first when the project's own isn't in the list (30 fps).
+pub const FRAME_RATE_FALLBACK: usize = 2;
+
+/// Which offered frame rate is the project's own, as the original's
+/// ExportVideoOptionsPanelViewModel::frameRateIndexFromDraft (VECreator.dll 0x184458150) finds it:
+/// the first one exactly equal, or none.
+pub fn frame_rate_index(project_fps: f64) -> Option<usize> {
+    FRAME_RATES.iter().position(|&f| f == project_fps)
+}
 /// ToVeCompileSetting (videoeditor.dll 0x182cddf70): audio bitrate 192 000 (default),
 /// 256 000 or 320 000 bit/s; sample rate 44 100 Hz unless 48 000 is asked for.
 pub const AUDIO_KBPS: [u32; 3] = [192, 256, 320];
@@ -252,6 +266,13 @@ mod tests {
 
     fn custom(short_side: u32, kbps: u32, constant: bool) -> Settings {
         Settings { path: PathBuf::from("x.mp4"), short_side, fps: 30.0, quality: Quality::Custom, kbps, constant, audio: false, audio_kbps: 192 }
+    }
+
+    #[test]
+    fn export_starts_at_the_projects_frame_rate() {
+        assert_eq!(frame_rate_index(30.0), Some(2));
+        assert_eq!(frame_rate_index(60.0), Some(4));
+        assert_eq!(frame_rate_index(29.97), None);
     }
 
     #[test]
