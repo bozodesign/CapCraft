@@ -228,11 +228,10 @@ fn move_target(rows: &[Row], y: f32, from_main: bool) -> Option<Row> {
     rows.iter().find(|r| r.hit_y(y)).copied()
 }
 
-/// While a main-track clip is moved: the gap opened where it will go in, how far the clip is
-/// lifted above the track (share of its height) and how tall it is drawn while it follows the
-/// pointer (as in the person's picture of the original).
+/// While a clip is moved: the gap opened where it will land, and how tall the clip is drawn
+/// (share of its track's height) while it follows the pointer up, down and along, held at the
+/// point where it was grabbed (as in the person's picture of the original).
 const MOVE_SLOT: Color32 = Color32::from_rgb(52, 52, 56);
-const MOVE_LIFT: f32 = 0.3;
 const MOVE_FLOAT_H: f32 = 0.65;
 
 /// Where clips are drawn while one is being moved, before it is let go.
@@ -241,8 +240,8 @@ struct MovePreview {
     floating: Option<u64>,
     /// Where the other clips would start if it were let go now.
     starts: Vec<(u64, f64)>,
-    /// The gap opened on the main track for it (start, length).
-    slot: Option<(f64, f64)>,
+    /// The gap opened for it where it will land: (track, start, length).
+    slot: Option<(usize, f64, f64)>,
 }
 
 impl MovePreview {
@@ -420,45 +419,69 @@ impl App {
     fn move_preview(&self, rows: &[Row], ptr: Option<Pos2>, view: View) -> Option<MovePreview> {
         let d = self.tl_drag.as_ref().filter(|d| d.kind == DragKind::Move)?;
         let p = ptr?;
-        if d.main {
-            let o = d.orig.as_ref()?;
-            let mi = self.project.main_index();
-            let on_main = move_target(rows, p.y, true).map(|r| r.kind == TrackKind::Main).unwrap_or(false);
-            let mut clips: Vec<Clip> = self.project.tracks[mi].clips.iter().filter(|c| c.id != d.clip_id).cloned().collect();
-            let mut slot_i = None;
-            if on_main {
-                let idx = self.main_insert_index(view.t(p.x), Some(d.clip_id)).min(clips.len());
-                let mut c = o.clone();
-                c.transition = None;
-                clips.insert(idx, c);
-                slot_i = Some(idx);
+        if !d.main && !d.group.is_empty() {
+            return None;
+        }
+        let (ti, ci) = self.project.find_clip(d.clip_id)?;
+        let kind = self.project.tracks[ti].kind;
+        let mut c = if d.main { d.orig.clone()? } else { self.project.tracks[ti].clips[ci].clone() };
+        c.start = d.ghost;
+        let visual = c.text.is_none() && c.media.and_then(|m| self.project.media(m)).map(|m| m.is_visual()).unwrap_or(false);
+        let mi = self.project.main_index();
+        let target = move_target(rows, p.y, d.main).filter(|r| !self.project.tracks[r.ti].locked);
+        let above = target.is_none() && rows.first().map(|r| p.y < r.rect.top() - 3.0).unwrap_or(false);
+        let mut starts = vec![];
+        let mut slot = None;
+        // the main track packed from the start, optionally with the moved clip's gap at `ins`
+        let pack_main = |ins: Option<usize>, starts: &mut Vec<(u64, f64)>, slot: &mut Option<(usize, f64, f64)>| {
+            let mut clips: Vec<Clip> = self.project.tracks[mi].clips.iter().filter(|x| x.id != d.clip_id).cloned().collect();
+            let ins = ins.map(|i| i.min(clips.len()));
+            if let Some(i) = ins {
+                let mut g = c.clone();
+                g.transition = None;
+                clips.insert(i, g);
             }
-            let (mut t, mut starts, mut slot) = (0.0, vec![], None);
+            let mut t = 0.0;
             for i in 0..clips.len() {
-                if Some(i) == slot_i {
-                    slot = Some((t, clips[i].duration));
+                if Some(i) == ins {
+                    *slot = Some((mi, t, clips[i].duration));
                 } else {
                     starts.push((clips[i].id, t));
                 }
                 t += clips[i].duration - Project::transition_len(&clips, i);
             }
-            return Some(MovePreview { floating: Some(d.clip_id), starts, slot });
+        };
+        // another track with the clip put in at the join, the clips after it moved right
+        let put_in = |tti: usize, starts: &mut Vec<(u64, f64)>, slot: &mut Option<(usize, f64, f64)>| {
+            let mut copy = self.project.tracks[tti].clone();
+            insert_on(&mut copy, c.clone());
+            for x in &copy.clips {
+                if x.id == d.clip_id {
+                    *slot = Some((tti, x.start, x.duration));
+                } else {
+                    starts.push((x.id, x.start));
+                }
+            }
+        };
+        let t = view.t(p.x);
+        match (kind, target.map(|r| (r.ti, r.kind))) {
+            (TrackKind::Main, Some((_, TrackKind::Main))) => pack_main(Some(self.main_insert_index(t, Some(d.clip_id))), &mut starts, &mut slot),
+            (TrackKind::Main, Some((tti, TrackKind::Overlay))) if visual => {
+                pack_main(None, &mut starts, &mut slot);
+                put_in(tti, &mut starts, &mut slot);
+            }
+            (TrackKind::Main, _) if above && visual => pack_main(None, &mut starts, &mut slot),
+            (TrackKind::Main, _) => pack_main(Some(self.main_insert_index(t, Some(d.clip_id))), &mut starts, &mut slot),
+            (TrackKind::Overlay, Some((_, TrackKind::Main))) if visual => pack_main(Some(self.main_insert_index(t, None)), &mut starts, &mut slot),
+            (k, Some((tti, tk))) if tk == k => put_in(tti, &mut starts, &mut slot),
+            (k, None) if above && (k == TrackKind::Overlay || k == TrackKind::Text) => {}
+            _ => {
+                if fits(&self.project.tracks[ti], &c) {
+                    slot = Some((ti, c.start, c.duration));
+                }
+            }
         }
-        if !d.group.is_empty() {
-            return None;
-        }
-        let (ti, ci) = self.project.find_clip(d.clip_id)?;
-        let kind = self.project.tracks[ti].kind;
-        let row = rows.iter().find(|r| r.hit_y(p.y)).copied().filter(|r| r.kind == kind)?;
-        if self.project.tracks[row.ti].locked {
-            return None;
-        }
-        let c = self.project.tracks[ti].clips[ci].clone();
-        let mut copy = self.project.tracks[row.ti].clone();
-        insert_point(&copy, &c)?;
-        insert_on(&mut copy, c);
-        let starts = copy.clips.iter().filter(|x| x.id != d.clip_id).map(|x| (x.id, x.start)).collect();
-        Some(MovePreview { floating: None, starts, slot: None })
+        Some(MovePreview { floating: Some(d.clip_id), starts, slot })
     }
 
     /// While the start of a main-track clip is being trimmed: the clip's place on the track and
@@ -1113,38 +1136,28 @@ impl App {
         }
 
         // ghost of a main-track clip being moved, and where it would land
-        if let Some(d) = self.tl_drag.as_ref().filter(|d| d.kind == DragKind::Move && d.main) {
-            if let (Some(o), Some(p)) = (&d.orig, ptr) {
-                let row = move_target(&rows, p.y, true).or_else(|| rows.iter().find(|r| r.kind == TrackKind::Main).copied());
-                if let Some(row) = row {
-                    let w = (o.duration as f32 * view.zoom).max(4.0);
-                    if let Some((s, len)) = mv.as_ref().and_then(|m| m.slot) {
-                        // the gap opened where it will go in, and the clip itself following the
-                        // pointer, lifted a little above the track
-                        let slot = Rect::from_min_max(pos2(view.x(s), row.rect.top() + 1.0), pos2(view.x(s + len), row.rect.bottom() - 1.0));
-                        painter.rect_filled(slot, 4.0, MOVE_SLOT);
-                        let h = row.rect.height();
-                        let r = Rect::from_min_size(pos2(view.x(d.ghost), row.rect.top() - h * MOVE_LIFT), vec2(w, h * MOVE_FLOAT_H));
-                        let mut c = o.clone();
-                        c.start = d.ghost;
-                        self.draw_clip(&painter, &c, row.kind, r, true, false, view, content);
-                    } else {
-                        let r = Rect::from_min_size(pos2(view.x(d.ghost), row.rect.top() + 1.0), vec2(w, row.rect.height() - 2.0));
-                        painter.rect_filled(r, 4.0, Color32::from_rgba_unmultiplied(239, 45, 72, 70));
-                        painter.rect_stroke(r, 4.0, Stroke::new(1.5_f32, ACCENT), StrokeKind::Inside);
-                    }
+        // a clip being moved: the gap opened where it will land, and the clip itself following
+        // the pointer both ways, held where it was grabbed (as in the original)
+        if let (Some(d), Some(m), Some(p)) = (self.tl_drag.as_ref().filter(|d| d.kind == DragKind::Move), mv.as_ref(), ptr) {
+            if let Some((sti, s, len)) = m.slot {
+                if let Some(row) = rows.iter().find(|r| r.ti == sti) {
+                    let slot = Rect::from_min_max(pos2(view.x(s), row.rect.top() + 1.0), pos2(view.x(s + len), row.rect.bottom() - 1.0));
+                    painter.rect_filled(slot, 4.0, MOVE_SLOT);
+                    painter.rect_stroke(slot, 4.0, Stroke::new(1.0_f32, Color32::from_gray(110)), StrokeKind::Inside);
                 }
             }
-        }
-        // a clip moved over others on its own kind of track: where it would go in
-        if let Some(d) = self.tl_drag.as_ref().filter(|d| d.kind == DragKind::Move && !d.main && d.group.is_empty()) {
-            let kind = self.project.find_clip(d.clip_id).map(|(ti, _)| self.project.tracks[ti].kind);
-            let row = ptr.and_then(|p| rows.iter().find(|r| r.hit_y(p.y)).copied()).filter(|r| Some(r.kind) == kind);
-            if let (Some(row), Some(c)) = (row, self.project.clip(d.clip_id)) {
-                if let Some(at) = insert_point(&self.project.tracks[row.ti], c) {
-                    let x = view.x(at);
-                    painter.line_segment([pos2(x, row.rect.top() - 4.0), pos2(x, row.rect.bottom() + 4.0)], Stroke::new(3.0_f32, ACCENT));
-                }
+            let src = self.project.find_clip(d.clip_id).map(|(ti, _)| ti);
+            let c = if d.main { d.orig.clone() } else { self.project.clip(d.clip_id).cloned() };
+            if let (Some(mut c), Some(row)) = (c, src.and_then(|ti| rows.iter().find(|r| r.ti == ti).copied())) {
+                c.start = d.ghost;
+                let h = row.rect.height() - 2.0;
+                let fh = h * MOVE_FLOAT_H;
+                // the share of the clip's height above the pointer when it was grabbed
+                let grip = ((d.from.y - row.rect.top() - 1.0) / h.max(1.0)).clamp(0.0, 1.0);
+                let w = (c.duration as f32 * view.zoom).max(4.0);
+                let r = Rect::from_min_size(pos2(view.x(d.ghost), p.y - grip * fh), vec2(w, fh));
+                painter.rect_filled(r.translate(vec2(0.0, 3.0)), 4.0, Color32::from_black_alpha(90));
+                self.draw_clip(&painter, &c, row.kind, r, true, false, view, content);
             }
         }
         if let Some((x, r)) = drop_line {

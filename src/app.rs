@@ -180,6 +180,39 @@ struct PreviewSources<'a> {
 /// How far ahead of the playhead the player starts the decoders of the clips coming up.
 pub const PREROLL_SECONDS: f64 = 1.5;
 
+/// Where a clip goes in on the main track for a time: counted on the track as it closes up
+/// without the clip being moved (`skip`), so it matches the gap shown while dragging. Past the
+/// middle of a clip goes in after it.
+pub fn main_slot(clips: &[Clip], t: f64, skip: Option<u64>) -> usize {
+    let mut at = 0.0;
+    let mut n = 0;
+    for c in clips.iter().filter(|c| Some(c.id) != skip) {
+        if at + c.duration / 2.0 < t {
+            n += 1;
+        }
+        at += c.duration;
+    }
+    n
+}
+
+#[cfg(test)]
+mod slot_tests {
+    use super::*;
+
+    #[test]
+    fn the_place_on_the_main_track_ignores_the_clip_being_moved() {
+        let clips = vec![Clip::new(1, None, 0.0, 2.0), Clip::new(2, None, 2.0, 2.0), Clip::new(3, None, 4.0, 2.0)];
+        // the first clip taken out, the others close up to 0-2 and 2-4: 2.5 s is past the
+        // middle of the second clip, so it goes in after it
+        assert_eq!(main_slot(&clips, 2.5, Some(1)), 1);
+        assert_eq!(main_slot(&clips, 0.5, Some(1)), 0);
+        assert_eq!(main_slot(&clips, 9.0, Some(1)), 2);
+        // nothing taken out: the track as it is
+        assert_eq!(main_slot(&clips, 2.5, None), 1);
+        assert_eq!(main_slot(&clips, 3.5, None), 2);
+    }
+}
+
 impl Sources for PreviewSources<'_> {
     fn video(&mut self, clip_id: u64, m: &Media, src_t: f64, w: usize, h: usize) -> Option<Arc<Frame>> {
         let fps = m.fps.min(self.fps).max(1.0);
@@ -694,8 +727,10 @@ impl App {
 
     /// Insert index on the main track for a time.
     pub fn main_insert_index(&self, t: f64, skip: Option<u64>) -> usize {
+        // counted on the main track as it closes up without the clip being moved, so the place
+        // matches the gap shown while dragging: past the middle of a clip goes in after it
         let mi = self.project.main_index();
-        self.project.tracks[mi].clips.iter().filter(|c| Some(c.id) != skip).filter(|c| c.start + c.duration / 2.0 < t).count()
+        main_slot(&self.project.tracks[mi].clips, t, skip)
     }
 
     pub fn add_media_at(&mut self, media_id: u64, kind: Option<TrackKind>, t: f64) {
