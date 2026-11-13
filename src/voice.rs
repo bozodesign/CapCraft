@@ -472,15 +472,19 @@ pub fn tempo(speed: f64) -> Option<String> {
 
 /// Keeping the original's mood: Speech to Speech carries over how each line was said (its
 /// emotion, emphasis, pace and pauses); a low stability lets the new voice follow that closely
-/// instead of evening it out, no style exaggeration keeps the new voice's own manner from
-/// replacing it, and a high similarity keeps the new voice recognisable.
+/// instead of evening it out, and a high similarity keeps the new voice recognisable.
 pub const MOOD_STABILITY: f32 = 0.3;
 pub const MOOD_SIMILARITY: f32 = 0.8;
-pub const MOOD_STYLE: f32 = 0.0;
+/// No emotion is pushed on top of the person's own: the original's "default" mood leaves the
+/// emotion choice empty and its strength at 0 (a clip without one reads 0).
+pub const MOOD_STYLE: f64 = 0.0;
+/// The pace stays the person's: the original's speed starts at 1.0 and must be above 0.
+pub const MOOD_SPEED: f64 = 1.0;
 
 /// The voice settings sent with each request when the original's mood is kept.
 pub fn mood_settings() -> String {
-    format!(r#"{{"stability":{MOOD_STABILITY},"similarity_boost":{MOOD_SIMILARITY},"style":{MOOD_STYLE},"use_speaker_boost":true}}"#)
+    debug_assert!(MOOD_SPEED > 0.0);
+    format!(r#"{{"stability":{MOOD_STABILITY},"similarity_boost":{MOOD_SIMILARITY},"style":{MOOD_STYLE},"speed":{MOOD_SPEED:.1},"use_speaker_boost":true}}"#)
 }
 
 /// The settings for one Speech to Speech request: the sound in, the new voice's MP3 out.
@@ -1300,11 +1304,13 @@ mod tests {
         assert!(c.contains("model_id=eleven_multilingual_sts_v2"));
         assert!(c.contains("remove_background_noise=true"));
         // the original's mood: expressive settings sent as JSON, only when asked for
-        assert!(c.contains(r#"voice_settings={\"stability\":0.3,\"similarity_boost\":0.8,\"style\":0,\"use_speaker_boost\":true}"#), "{c}");
+        assert!(c.contains(r#"voice_settings={\"stability\":0.3,\"similarity_boost\":0.8,\"style\":0,\"speed\":1.0,\"use_speaker_boost\":true}"#), "{c}");
         let plain = sts_config(Path::new("in.flac"), Path::new("out.mp3"), "k", "abc", false, false);
         assert!(!plain.contains("voice_settings"));
         let m: serde_json::Value = serde_json::from_str(&mood_settings()).unwrap();
         assert_eq!(m["stability"].as_f64().unwrap() as f32, MOOD_STABILITY);
+        assert_eq!(m["style"].as_f64().unwrap(), 0.0);
+        assert_eq!(m["speed"].as_f64().unwrap(), 1.0);
         assert!(c.contains(r#"output = "C:\\t\\out.mp3""#));
         let v = parse_voices(r#"{"voices":[{"voice_id":"v1","name":"Rachel","description":"calm"},{"name":"no id"}]}"#).unwrap();
         assert_eq!(v, vec![Voice { id: "v1".into(), name: "Rachel".into(), description: "calm".into(), ..Default::default() }]);
