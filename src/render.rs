@@ -1392,6 +1392,9 @@ impl Renderer {
 
     fn draw_text(&mut self, out: &mut Frame, p: &Project, c: &Clip, t: f64) -> Option<LayerBox> {
         let s = c.text.as_ref()?;
+        // the words' times are found in the text as typed: the heard words are in its case, and
+        // a letter case keeps one letter per letter, so the places carry over to the cased text
+        let typed = s;
         // draw the words in the chosen letter case (the typed text stays as it is)
         let cased;
         let s = if s.case != TextCase::None {
@@ -1446,7 +1449,7 @@ impl Renderer {
         let mut one_word: Option<TextStyle> = None;
         let mut words = None;
         if s.word_mode != WordMode::All {
-            let spans = s.spans(c.duration);
+            let spans = typed.spans(c.duration);
             if let Some(i) = word_at(&spans, lt as f64) {
                 let wsp = spans[i];
                 match s.word_mode {
@@ -1659,6 +1662,29 @@ mod tests {
         }
         fn image(&mut self, _m: &Media, _w: usize, _h: usize) -> Option<Arc<Frame>> {
             None
+        }
+    }
+
+    /// A caption shown one word at a time (or word by word) changes as its words are said.
+    #[test]
+    fn word_by_word_captions_change_as_the_words_are_said() {
+        for mode in [WordMode::One, WordMode::Highlight, WordMode::Build] {
+            let mut p = Project::new("w");
+            let id = p.new_id();
+            let mut c = Clip::new(id, None, 3.12, 3.55);
+            let mut st = TextStyle::new("Welcome to my channel. Today", TextKind::Caption);
+            st.word_texts = ["Welcome", "to", "my", "channel.", "Today"].iter().map(|w| w.to_string()).collect();
+            st.word_times = vec![[0, 220], [220, 400], [400, 780], [780, 2070], [2070, 3550]];
+            st.word_mode = mode;
+            // capitals (the letter case option) keep the word timing
+            st.case = TextCase::Upper;
+            c.text = Some(st);
+            p.place_free(TrackKind::Text, c);
+            let mut r = Renderer::new();
+            let mut src = Asked(vec![]);
+            let (a, _) = r.render(&p, 3.12 + 0.1, 640, 360, &mut src);
+            let (b, _) = r.render(&p, 3.12 + 2.5, 640, 360, &mut src);
+            assert!(a.data != b.data, "{mode:?}: the caption looks the same while different words are said");
         }
     }
 

@@ -658,7 +658,7 @@ mod tests {
             refine(&mut s, &read_wav(Path::new(&w)).unwrap());
         }
         for x in &s {
-            println!("{:.2}-{:.2} {:?}", x.start, x.end, x.text);
+            println!("{:.2}-{:.2} {:?} {:?} {:?}", x.start, x.end, x.text, x.word_texts, x.words);
             for (w, t) in x.word_texts.iter().zip(&x.words) {
                 println!("    {:>6.2} {:>6.2} {w}", x.start + t[0] as f64 / 1000.0, x.start + t[1] as f64 / 1000.0);
             }
@@ -686,7 +686,7 @@ mod tests {
         let st = Arc::new(Mutex::new(State::default()));
         let s = run(p, &pcm, &o, &st).unwrap();
         for x in &s {
-            println!("{:.2}-{:.2} {:?}", x.start, x.end, x.text);
+            println!("{:.2}-{:.2} {:?} {:?} {:?}", x.start, x.end, x.text, x.word_texts, x.words);
         }
         assert!(s.iter().any(|x| x.text.to_lowercase().contains("channel")));
         assert!(st.lock().unwrap_or_else(|e| e.into_inner()).progress >= SPEECH_PROGRESS_READY / 100.0 - 1e-6, "progress was read");
