@@ -145,7 +145,7 @@ fn file() -> PathBuf {
     crate::projects::settings_dir().join("layouts.json")
 }
 
-fn key_file() -> PathBuf {
+pub fn key_file() -> PathBuf {
     crate::projects::settings_dir().join("elevenlabs-key.txt")
 }
 

@@ -37,6 +37,8 @@ pub struct Word {
     pub start: i64,
     pub end: i64,
     pub spacing: bool,
+    /// Who said it ("speaker_0", "speaker_1"...), when the request asked for it.
+    pub speaker: String,
 }
 
 /// The words of ElevenLabs' answer. Sound events ("(laughs)") are left out.
@@ -53,7 +55,8 @@ pub fn words(body: &str) -> Result<Vec<Word>, String> {
             }
             let text = w.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string();
             let (s, e) = (ms(w, "start"), ms(w, "end"));
-            Some(Word { text, start: s, end: e.max(s), spacing: kind == "spacing" })
+            let speaker = w.get("speaker_id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            Some(Word { text, start: s, end: e.max(s), spacing: kind == "spacing", speaker })
         })
         .collect())
 }
@@ -100,33 +103,127 @@ pub fn sentences(words: &[Word], max_bytes: usize) -> Vec<Sentence> {
 }
 
 /// A text value for curl's settings: quoted, with `\` and `"` escaped.
-fn quoted(s: &str) -> String {
+pub fn quoted(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// The settings curl reads from its standard input for one request.
-pub fn curl_config(file: &Path, key: &str, model: &str, language: &str) -> String {
+/// The settings curl reads from its standard input for one request. With `diarize`, ElevenLabs
+/// also says who said each word (`speaker_id`), for the voice changer's one track per person.
+pub fn curl_config(file: &Path, key: &str, model: &str, language: &str, diarize: bool) -> String {
     let mut c = String::new();
     c += &format!("url = {}\n", quoted(URL));
-    c += &format!("header = {}\n", quoted(&format!("xi-api-key: {}", key.trim())));
+    c += &key_header(key);
     c += &format!("form = {}\n", quoted(&format!("model_id={model}")));
     c += &format!("form = {}\n", quoted("timestamps_granularity=word"));
     c += &format!("form = {}\n", quoted("tag_audio_events=false"));
+    if diarize {
+        c += &format!("form = {}\n", quoted("diarize=true"));
+    }
     if language != "auto" && !language.is_empty() {
         c += &format!("form = {}\n", quoted(&format!("language_code={language}")));
     }
     c += &format!("form = {}\n", quoted(&format!("file=@{}", file.display())));
-    c += "silent\nshow-error\n";
+    c += &curl_tail();
+    c
+}
+
+/// The API key header line.
+pub fn key_header(key: &str) -> String {
+    format!("header = {}\n", quoted(&format!("xi-api-key: {}", key.trim())))
+}
+
+/// The settings every request ends with: quiet, a time limit, and the answer's status code
+/// written last on its own line.
+pub fn curl_tail() -> String {
+    let mut c = String::from("silent\nshow-error\n");
     c += &format!("max-time = {MAX_SECS}\n");
     c += &format!("write-out = {}\n", quoted("\\n%{http_code}"));
     c
 }
 
 /// ElevenLabs' message in an error answer.
-fn message(body: &str) -> String {
+pub fn message(body: &str) -> String {
     let v: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
     let d = v.get("detail");
     d.and_then(|d| d.get("message")).and_then(|m| m.as_str()).or_else(|| d.and_then(|d| d.as_str())).map(|s| s.to_string()).unwrap_or_else(|| body.chars().take(200).collect())
+}
+
+/// Run one request with the system's curl, its settings on standard input (so the key never
+/// shows in the list of running programs). Returns the answer and its status code. `cancel` is
+/// asked while waiting; it stops the request.
+pub fn curl(config: &str, cancel: &dyn Fn() -> bool) -> Result<(String, u16), String> {
+    // Windows' own curl first (another program's copy may be first on the PATH)
+    let sys = std::env::var_os("SystemRoot").map(|r| Path::new(&r).join("System32").join("curl.exe")).filter(|p| p.is_file());
+    let mut c = match sys {
+        Some(p) => Command::new(p),
+        None => Command::new("curl"),
+    };
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x0800_0000);
+    }
+    let mut child = c.args(["-K", "-"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("Couldn't reach ElevenLabs (curl): {e}"))?;
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(config.as_bytes());
+    }
+    // read the answer while it comes, so a big one never stops curl
+    let mut so = child.stdout.take().unwrap();
+    let mut se = child.stderr.take().unwrap();
+    let ro = std::thread::spawn(move || {
+        let mut s = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut so, &mut s);
+        String::from_utf8_lossy(&s).into_owned()
+    });
+    let re = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = std::io::Read::read_to_string(&mut se, &mut s);
+        s
+    });
+    loop {
+        if cancel() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("Stopped".into());
+        }
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(150)),
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    let out = ro.join().unwrap_or_default();
+    let err = re.join().unwrap_or_default();
+    let (body, code) = match out.rfind('\n') {
+        Some(i) => (out[..i].to_string(), out[i + 1..].trim().parse::<u16>().unwrap_or(0)),
+        None => (String::new(), 0),
+    };
+    if code == 0 {
+        return Err(format!("Couldn't reach ElevenLabs. {}", err.trim()));
+    }
+    Ok((body, code))
+}
+
+/// Send a sound file to ElevenLabs' Speech to Text and return its words (with who said each
+/// one when `diarize` is on).
+pub fn transcribe_words(file: &Path, key: &str, language: &str, diarize: bool, cancel: &dyn Fn() -> bool) -> Result<Vec<Word>, String> {
+    if key.trim().is_empty() {
+        return Err("Put your ElevenLabs API key in Settings → Auto captions".into());
+    }
+    let mut last_err = String::new();
+    for model in MODELS {
+        let (body, code) = curl(&curl_config(file, key, model, language, diarize), cancel)?;
+        match code {
+            200 => return words(&body),
+            401 => return Err("ElevenLabs didn't accept the API key (Settings → Auto captions)".into()),
+            400 | 404 | 422 if message(&body).to_lowercase().contains("model") => {
+                last_err = message(&body);
+                continue;
+            }
+            c => return Err(format!("ElevenLabs said no ({c}): {}", message(&body))),
+        }
+    }
+    Err(format!("ElevenLabs said no: {last_err}"))
 }
 
 /// Send the 16 kHz sound to ElevenLabs and make captions from its answer.
@@ -144,69 +241,10 @@ pub fn transcribe(ffmpeg: &Path, wav: &Path, dir: &Path, key: &str, language: &s
         g.stage = "Listening online (ElevenLabs)…".into();
         g.progress = crate::speech::SPEECH_PROGRESS_SUBMIT / 100.0;
     }
-    let mut last_err = String::new();
-    for model in MODELS {
-        // Windows' own curl first (another program's copy may be first on the PATH)
-        let sys = std::env::var_os("SystemRoot").map(|r| Path::new(&r).join("System32").join("curl.exe")).filter(|p| p.is_file());
-        let mut c = match sys {
-            Some(p) => Command::new(p),
-            None => Command::new("curl"),
-        };
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            c.creation_flags(0x0800_0000);
-        }
-        let mut child = c.args(["-K", "-"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("Couldn't reach ElevenLabs (curl): {e}"))?;
-        if let Some(mut i) = child.stdin.take() {
-            let _ = i.write_all(curl_config(&flac, key, model, language).as_bytes());
-        }
-        // read the answer while it comes, so a big one never stops curl
-        let mut so = child.stdout.take().unwrap();
-        let mut se = child.stderr.take().unwrap();
-        let ro = std::thread::spawn(move || {
-            let mut s = String::new();
-            let _ = std::io::Read::read_to_string(&mut so, &mut s);
-            s
-        });
-        let re = std::thread::spawn(move || {
-            let mut s = String::new();
-            let _ = std::io::Read::read_to_string(&mut se, &mut s);
-            s
-        });
-        loop {
-            if st.lock().unwrap_or_else(|e| e.into_inner()).cancel {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err("Stopped".into());
-            }
-            match child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(150)),
-                Err(e) => return Err(e.to_string()),
-            }
-        }
-        let out = ro.join().unwrap_or_default();
-        let err = re.join().unwrap_or_default();
-        let (body, code) = match out.rfind('\n') {
-            Some(i) => (&out[..i], out[i + 1..].trim().parse::<u16>().unwrap_or(0)),
-            None => ("", 0),
-        };
-        match code {
-            200 => {
-                st.lock().unwrap_or_else(|e| e.into_inner()).progress = crate::speech::SPEECH_PROGRESS_READY / 100.0;
-                return Ok(sentences(&words(body)?, max_bytes));
-            }
-            0 => return Err(format!("Couldn't reach ElevenLabs. {}", err.trim())),
-            401 => return Err("ElevenLabs didn't accept the API key (Settings → Auto captions)".into()),
-            400 | 404 | 422 if message(body).to_lowercase().contains("model") => {
-                last_err = message(body);
-                continue;
-            }
-            c => return Err(format!("ElevenLabs said no ({c}): {}", message(body))),
-        }
-    }
-    Err(format!("ElevenLabs said no: {last_err}"))
+    let cancel = || st.lock().unwrap_or_else(|e| e.into_inner()).cancel;
+    let w = transcribe_words(&flac, key, language, false, &cancel)?;
+    st.lock().unwrap_or_else(|e| e.into_inner()).progress = crate::speech::SPEECH_PROGRESS_READY / 100.0;
+    Ok(sentences(&w, max_bytes))
 }
 
 #[cfg(test)]
@@ -239,8 +277,8 @@ mod tests {
         let many: Vec<Word> = (0..40)
             .flat_map(|i| {
                 [
-                    Word { text: "go".into(), start: i * 100, end: i * 100 + 80, spacing: false },
-                    Word { text: " ".into(), start: i * 100 + 80, end: i * 100 + 100, spacing: true },
+                    Word { text: "go".into(), start: i * 100, end: i * 100 + 80, spacing: false, speaker: String::new() },
+                    Word { text: " ".into(), start: i * 100 + 80, end: i * 100 + 100, spacing: true, speaker: String::new() },
                 ]
             })
             .collect();
@@ -250,11 +288,13 @@ mod tests {
 
     #[test]
     fn the_key_and_file_go_to_curl_quoted() {
-        let c = curl_config(Path::new(r"C:\Temp\a b\x.flac"), " k\"ey ", "scribe_v1", "th");
+        let c = curl_config(Path::new(r"C:\Temp\a b\x.flac"), " k\"ey ", "scribe_v1", "th", true);
         assert!(c.contains("header = \"xi-api-key: k\\\"ey\""), "{c}");
         assert!(c.contains(r#"form = "file=@C:\\Temp\\a b\\x.flac""#), "{c}");
         assert!(c.contains("language_code=th"));
-        assert!(!curl_config(Path::new("x"), "k", "scribe_v1", "auto").contains("language_code"));
+        assert!(c.contains("diarize=true"));
+        assert!(!curl_config(Path::new("x"), "k", "scribe_v1", "auto", false).contains("language_code"));
+        assert!(!curl_config(Path::new("x"), "k", "scribe_v1", "auto", false).contains("diarize"));
         assert_eq!(message(r#"{"detail":{"status":"invalid_model","message":"bad model_id"}}"#), "bad model_id");
     }
 }

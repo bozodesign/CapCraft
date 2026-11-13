@@ -20,6 +20,7 @@ mod speech;
 mod srt;
 mod thai;
 mod theme;
+mod voice;
 mod timeline;
 mod winsound;
 mod words;
@@ -46,6 +47,11 @@ fn crash_log() {
 fn main() -> eframe::Result<()> {
     crash_log();
     let args: Vec<String> = std::env::args().collect();
+    // --mcp: the voice changer's tools for Claude Code, on standard input/output (no window)
+    if args.iter().any(|a| a == "--mcp") {
+        voice::serve_mcp();
+        return Ok(());
+    }
     let mut screenshot: Option<PathBuf> = None;
     let mut open: Option<PathBuf> = None;
     // --export-test <file.mp4>: write the sample project to a video without a window (a self-check)

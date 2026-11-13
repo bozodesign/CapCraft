@@ -636,6 +636,7 @@ impl App {
         let playhead = self.playhead;
         let frame = 1.0 / (self.project.fps as f64).max(1.0);
         let mut separate = false;
+        let mut voices = false;
         let Some(c) = self.project.clip_mut(id) else { return };
         heading(ui, "Volume");
         // the playhead on a volume point: the slider sets that point's level
@@ -735,9 +736,17 @@ impl App {
         slider(ui, "Fade out", &mut c.fade_out, 0.0..=fade_limit(dur as f64), 0.0, " s", 1.0);
         if c.text.is_none() && c.media.is_some() {
             ui.add_space(6.0);
-            if icon_button(ui, "♪", "Separate sound to its own track").clicked() {
-                separate = true;
-            }
+            ui.horizontal(|ui| {
+                if icon_button(ui, "♪", "Separate sound to its own track").clicked() {
+                    separate = true;
+                }
+                if icon_button(ui, "🎤", "Voice changer: new voices for each person (ElevenLabs)").clicked() {
+                    voices = true;
+                }
+            });
+        }
+        if voices {
+            self.open_voice_changer();
         }
         if separate {
             self.separate_audio();

@@ -1878,6 +1878,17 @@ impl Project {
         self.relayout();
     }
 
+    /// A new track of `kind` holding these clips (kept at their times), above the others of its
+    /// kind: the voice changer gives each person one. Returns the track's id.
+    pub fn add_track_of(&mut self, kind: TrackKind, mut clips: Vec<Clip>) -> u64 {
+        clips.sort_by(|a, b| a.start.total_cmp(&b.start));
+        let tid = self.new_id();
+        let pos = self.tracks.iter().rposition(|t| t.kind == kind).map(|p| p + 1).unwrap_or(self.tracks.len());
+        self.tracks.insert(pos, Track { id: tid, kind, clips, muted: false, hidden: false, locked: false });
+        self.relayout();
+        tid
+    }
+
     /// Place a clip on a track of `kind` at its start, using the first track
     /// where it doesn't overlap, or a new one.
     pub fn place_free(&mut self, kind: TrackKind, clip: Clip) -> u64 {

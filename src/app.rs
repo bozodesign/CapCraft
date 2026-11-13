@@ -170,6 +170,8 @@ pub struct App {
     pub show_settings: bool,
     /// Auto captions running in the background.
     pub speech_job: Option<Arc<Mutex<crate::speech::State>>>,
+    /// The voice changer window and its work (voice.rs).
+    pub voice: crate::voice::Panel,
     avatar_tex: Option<(String, Option<TextureHandle>)>,
 }
 
@@ -412,6 +414,7 @@ impl App {
             mine_thumbs: HashMap::new(),
             show_settings: false,
             speech_job: None,
+            voice: crate::voice::Panel::default(),
             avatar_tex: None,
         };
         if app.screenshot.is_some() {
@@ -438,6 +441,7 @@ impl App {
                 app.layouts.avatar_path = a;
             }
             app.show_settings = std::env::var_os("CUTSTUDIO_SHOT_SETTINGS").is_some();
+            app.voice.open = std::env::var_os("CUTSTUDIO_SHOT_VOICE").is_some();
         }
         app.build_filter_previews(&cc.egui_ctx);
         match open {
@@ -2655,6 +2659,7 @@ impl App {
         self.export_window(ctx);
         self.shortcuts_window(ctx);
         self.settings_window(ctx);
+        self.voice_window(ctx);
         self.toast_ui(ctx);
         self.drag_ghost(ctx);
 
