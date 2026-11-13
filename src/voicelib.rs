@@ -43,6 +43,57 @@ pub const STYLES: [(&str, &str); 8] = [
     ("advertisement", "Advertisement"),
     ("informative_educational", "Informative & educational"),
 ];
+/// Languages (ElevenLabs' code, shown): English first and Thai second, the ones used most; the
+/// rest, used now and then, after a line in alphabetical order.
+pub const LANGUAGES: [(&str, &str); 34] = [
+    ("", "Any language"),
+    ("en", "English"),
+    ("th", "Thai"),
+    ("ar", "Arabic"),
+    ("bg", "Bulgarian"),
+    ("zh", "Chinese"),
+    ("hr", "Croatian"),
+    ("cs", "Czech"),
+    ("da", "Danish"),
+    ("nl", "Dutch"),
+    ("fil", "Filipino"),
+    ("fi", "Finnish"),
+    ("fr", "French"),
+    ("de", "German"),
+    ("el", "Greek"),
+    ("hi", "Hindi"),
+    ("hu", "Hungarian"),
+    ("id", "Indonesian"),
+    ("it", "Italian"),
+    ("ja", "Japanese"),
+    ("ko", "Korean"),
+    ("ms", "Malay"),
+    ("no", "Norwegian"),
+    ("pl", "Polish"),
+    ("pt", "Portuguese"),
+    ("ro", "Romanian"),
+    ("ru", "Russian"),
+    ("sk", "Slovak"),
+    ("es", "Spanish"),
+    ("sv", "Swedish"),
+    ("ta", "Tamil"),
+    ("tr", "Turkish"),
+    ("uk", "Ukrainian"),
+    ("vi", "Vietnamese"),
+];
+/// How many of LANGUAGES come before the line (Any, English, Thai).
+pub const COMMON_LANGUAGES: usize = 3;
+
+/// A language code's name ("th" → "Thai"); unknown codes are shown as they are.
+pub fn language_name(code: &str) -> String {
+    let c = code.trim().to_lowercase();
+    LANGUAGES.iter().skip(1).find(|(k, _)| *k == c).map(|(_, n)| n.to_string()).unwrap_or_else(|| c.to_uppercase())
+}
+
+/// The language codes a voice speaks (kept comma-separated in `Voice::language`).
+pub fn languages_of(v: &Voice) -> Vec<String> {
+    v.language.split(',').map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect()
+}
 
 /// A word from ElevenLabs' labels made readable: "middle_aged" → "Middle-aged",
 /// "narrative_story" → "Narrative story".
@@ -80,6 +131,19 @@ pub fn read_voice(x: &serde_json::Value) -> Option<Voice> {
             u
         }
     };
+    // its language, then every language ElevenLabs checked it speaks
+    let mut langs: Vec<String> = Vec::new();
+    let mut add = |l: &str| {
+        let l = l.trim().to_lowercase();
+        let l = l.split(['-', '_']).next().unwrap_or("").to_string();
+        if !l.is_empty() && !langs.contains(&l) {
+            langs.push(l);
+        }
+    };
+    add(&pick("language"));
+    for l in x.get("verified_languages").and_then(|l| l.as_array()).into_iter().flatten() {
+        add(&text(l, "language"));
+    }
     let mut description = text(x, "description");
     if description.is_empty() {
         description = pick("descriptive");
@@ -96,7 +160,7 @@ pub fn read_voice(x: &serde_json::Value) -> Option<Voice> {
         age: pick("age"),
         accent: pick("accent"),
         style,
-        language: pick("language"),
+        language: langs.join(","),
         preview_url: text(x, "preview_url"),
         owner: text(x, "public_owner_id"),
         favorite: false,
@@ -115,9 +179,9 @@ fn enc(s: &str) -> String {
 }
 
 /// The search address for the shared library.
-pub fn shared_url(search: &str, gender: &str, age: &str, style: &str) -> String {
+pub fn shared_url(search: &str, gender: &str, age: &str, style: &str, language: &str) -> String {
     let mut u = format!("{SHARED_URL}?page_size={PAGE_SIZE}");
-    for (k, v) in [("search", search.trim()), ("gender", gender), ("age", age), ("use_cases", style)] {
+    for (k, v) in [("search", search.trim()), ("gender", gender), ("age", age), ("use_cases", style), ("language", language)] {
         if !v.is_empty() {
             u += &format!("&{k}={}", enc(v));
         }
@@ -125,8 +189,8 @@ pub fn shared_url(search: &str, gender: &str, age: &str, style: &str) -> String 
     u
 }
 
-pub fn search_shared(key: &str, search: &str, gender: &str, age: &str, style: &str) -> Result<Vec<Voice>, String> {
-    let c = format!("url = {}\n{}{}", quoted(&shared_url(search, gender, age, style)), key_header(key), curl_tail());
+pub fn search_shared(key: &str, search: &str, gender: &str, age: &str, style: &str, language: &str) -> Result<Vec<Voice>, String> {
+    let c = format!("url = {}\n{}{}", quoted(&shared_url(search, gender, age, style, language)), key_header(key), curl_tail());
     let (body, code) = curl(&c, &|| false)?;
     if code != 200 {
         return Err(format!("The Voice Library said no ({code}): {}", crate::eleven::message(&body)));
@@ -293,6 +357,8 @@ pub struct Library {
     pub gender: usize,
     pub age: usize,
     pub style: usize,
+    /// Index into LANGUAGES.
+    pub language: usize,
     pub shared: Vec<Voice>,
     searched: bool,
     searching: Option<Task<Vec<Voice>>>,
@@ -304,13 +370,14 @@ pub struct Library {
 
 /// Does a voice pass the filters? (My voices and Favourites are filtered here; the shared
 /// library is filtered by ElevenLabs.)
-pub fn passes(v: &Voice, search: &str, gender: &str, age: &str, style: &str) -> bool {
+pub fn passes(v: &Voice, search: &str, gender: &str, age: &str, style: &str, language: &str) -> bool {
     let q = search.trim().to_lowercase();
     let hay = format!("{} {} {} {} {}", v.name, v.description, v.accent, v.style, v.language).to_lowercase();
     (q.is_empty() || q.split_whitespace().all(|w| hay.contains(w)))
         && (gender.is_empty() || v.gender.eq_ignore_ascii_case(gender))
         && (age.is_empty() || v.age.eq_ignore_ascii_case(age))
         && (style.is_empty() || v.style.eq_ignore_ascii_case(style) || v.style.to_lowercase().contains(&style.replace('_', " ")))
+        && (language.is_empty() || languages_of(v).iter().any(|l| l == language))
 }
 
 fn chip(ui: &mut egui::Ui, s: &str, fill: Color32) {
@@ -460,6 +527,17 @@ impl crate::app::App {
                 let mut changed = combo(ui, "vl-gender", &mut l.gender, &GENDERS);
                 changed |= combo(ui, "vl-age", &mut l.age, &AGES);
                 changed |= combo(ui, "vl-style", &mut l.style, &STYLES);
+                // languages: English and Thai on top, the rest after a line
+                let before = l.language;
+                egui::ComboBox::from_id_salt("vl-language").selected_text(LANGUAGES[l.language].1).width(110.0).height(360.0).show_ui(ui, |ui| {
+                    for (i, (_, label)) in LANGUAGES.iter().enumerate() {
+                        if i == COMMON_LANGUAGES {
+                            ui.separator();
+                        }
+                        ui.selectable_value(&mut l.language, i, *label);
+                    }
+                });
+                changed |= before != l.language;
                 let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if l.tab == Tab::Shared && (changed || enter) && !key.is_empty() {
                     act = Some(Act::Search);
@@ -488,13 +566,22 @@ impl crate::app::App {
                 });
             }
             ui.separator();
-            let (g, a, s) = (GENDERS[l.gender].0, AGES[l.age].0, STYLES[l.style].0);
+            let (g, a, s, lang) = (GENDERS[l.gender].0, AGES[l.age].0, STYLES[l.style].0, LANGUAGES[l.language].0);
             let list: Vec<Voice> = match l.tab {
-                Tab::Mine => store.voices.iter().filter(|v| v.owner.is_empty() && passes(v, &l.search, g, a, s)).cloned().collect(),
-                Tab::Favourites => store.voices.iter().filter(|v| v.favorite && passes(v, &l.search, g, a, s)).cloned().collect(),
+                Tab::Mine => store.voices.iter().filter(|v| v.owner.is_empty() && passes(v, &l.search, g, a, s, lang)).cloned().collect(),
+                Tab::Favourites => store.voices.iter().filter(|v| v.favorite && passes(v, &l.search, g, a, s, lang)).cloned().collect(),
                 Tab::Shared => l.shared.clone(),
             };
-            if list.is_empty() {
+            let filtering = !l.search.trim().is_empty() || l.gender + l.age + l.style + l.language > 0;
+            let has_any = match l.tab {
+                Tab::Mine => store.voices.iter().any(|v| v.owner.is_empty()),
+                Tab::Favourites => store.voices.iter().any(|v| v.favorite),
+                Tab::Shared => false,
+            };
+            if list.is_empty() && filtering && has_any {
+                let why = if l.language > 0 { " Voices loaded earlier may not know their language yet: press ⬇ in the voice changer to load them again." } else { "" };
+                ui.label(RichText::new(format!("No voice matches these filters.{why}")).color(MUTED).size(11.5));
+            } else if list.is_empty() {
                 let empty = match l.tab {
                     Tab::Mine => "No voices yet. Press ⬇ in the voice changer to load your ElevenLabs voices, or describe one there.",
                     Tab::Favourites => "Star a voice with ☆ to keep it here.",
@@ -532,6 +619,16 @@ impl crate::app::App {
                                         chip(ui, &pretty(&v.gender), gender_fill(&v.gender));
                                         chip(ui, &pretty(&v.age), BG3);
                                         chip(ui, &pretty(&v.accent), BG3);
+                                        let langs = languages_of(v);
+                                        if let Some(first) = langs.first() {
+                                            // the language picked in the filter is the one shown
+                                            let shown = if !lang.is_empty() && langs.iter().any(|x| x == lang) { lang.to_string() } else { first.clone() };
+                                            let more = if langs.len() > 1 { format!(" +{}", langs.len() - 1) } else { String::new() };
+                                            let r = ui.scope(|ui| chip(ui, &format!("{}{more}", language_name(&shown)), Color32::from_rgb(60, 90, 120))).response;
+                                            if langs.len() > 1 {
+                                                r.on_hover_text(langs.iter().map(|x| language_name(x)).collect::<Vec<_>>().join(", "));
+                                            }
+                                        }
                                     });
                                     let style = if v.style.is_empty() { v.description.clone() } else { pretty(&v.style) };
                                     let style = if style.is_empty() && v.gender.is_empty() && v.age.is_empty() { "No details yet: load your voices (⬇) again".to_string() } else { style };
@@ -617,8 +714,9 @@ impl crate::app::App {
                 let l = &mut self.voice.library;
                 l.searched = true;
                 let (q, g, a, s) = (l.search.clone(), GENDERS[l.gender].0.to_string(), AGES[l.age].0.to_string(), STYLES[l.style].0.to_string());
+                let lang = LANGUAGES[l.language].0.to_string();
                 let k = key.clone();
-                l.searching = Some(task(move || search_shared(&k, &q, &g, &a, &s)));
+                l.searching = Some(task(move || search_shared(&k, &q, &g, &a, &s, &lang)));
             }
             None => {}
         }
@@ -640,13 +738,26 @@ mod tests {
         assert_eq!(shared[0].owner, "o1");
         assert_eq!(pretty(&shared[0].style), "Narrative story");
         assert_eq!(pretty("middle_aged"), "Middle-aged");
-        assert!(passes(&shared[0], "wise brit", "male", "old", "narrative_story"));
-        assert!(!passes(&shared[0], "", "female", "", ""));
+        assert!(passes(&shared[0], "wise brit", "male", "old", "narrative_story", ""));
+        assert!(!passes(&shared[0], "", "female", "", "", ""));
+        // languages: its own, then the ones ElevenLabs checked; English first and Thai second
+        let th: serde_json::Value = serde_json::from_str(r#"{"voice_id":"t1","name":"Nok","language":"th","verified_languages":[{"language":"th"},{"language":"en-US"}]}"#).unwrap();
+        let t = read_voice(&th).unwrap();
+        assert_eq!(t.language, "th,en");
+        assert!(passes(&t, "", "", "", "", "en") && passes(&t, "", "", "", "", "th"));
+        assert!(!passes(&t, "", "", "", "", "ja"));
+        assert!(!passes(&shared[0], "", "", "", "", "en"), "no language known: not shown under a language");
+        assert_eq!((LANGUAGES[1].0, LANGUAGES[2].0), ("en", "th"));
+        assert_eq!(language_name("th"), "Thai");
+        let rest: Vec<&str> = LANGUAGES[COMMON_LANGUAGES..].iter().map(|(_, n)| *n).collect();
+        let mut sorted = rest.clone();
+        sorted.sort();
+        assert_eq!(rest, sorted);
     }
 
     #[test]
     fn library_search_address_and_samples() {
-        assert_eq!(shared_url(" deep voice ", "male", "", "social_media"), "https://api.elevenlabs.io/v1/shared-voices?page_size=60&search=deep%20voice&gender=male&use_cases=social_media");
+        assert_eq!(shared_url(" deep voice ", "male", "", "social_media", "th"), "https://api.elevenlabs.io/v1/shared-voices?page_size=60&search=deep%20voice&gender=male&use_cases=social_media&language=th");
         assert_eq!(base64("aGVsbG8=").unwrap(), b"hello");
         assert_eq!(base64("aGk").unwrap(), b"hi");
         assert!(base64("a").is_none());

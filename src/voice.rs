@@ -1119,7 +1119,7 @@ fn call_tool(name: &str, args: &serde_json::Value, key: &str) -> Result<String, 
             }
             let mut out = String::from("Voices:\n");
             for v in &st.voices {
-                let tags: Vec<&str> = [v.gender.as_str(), v.age.as_str(), v.accent.as_str(), v.style.as_str()].into_iter().filter(|t| !t.is_empty()).collect();
+                let tags: Vec<&str> = [v.gender.as_str(), v.age.as_str(), v.accent.as_str(), v.style.as_str(), v.language.as_str()].into_iter().filter(|t| !t.is_empty()).collect();
                 out += &format!(
                     "- {} (id {}){}{}{}{}\n",
                     v.name,
