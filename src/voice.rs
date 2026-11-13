@@ -173,6 +173,11 @@ pub struct Voice {
     /// Starred in the voice library.
     #[serde(default)]
     pub favorite: bool,
+    /// ElevenLabs' kind of voice ("premade", "cloned", "generated", "professional"...): the
+    /// first level the library groups by, as the original files a voice under
+    /// `tone_category_name` (videoeditor.dll from_json 0x180c41e70).
+    #[serde(default)]
+    pub category: String,
 }
 
 /// voices.json: the voices to choose from, and the voice picked for each person ("1", "2"...)
@@ -218,6 +223,7 @@ impl Store {
                     style: keep(&v.style, &o.style),
                     // the original patches its own language and the list each on its own
                     // (TtsLanguageInfo::patch_from_json 0x180bb70f0): only what the new copy has
+                    category: keep(&v.category, &o.category),
                     language: keep(&v.language, &o.language),
                     languages: keep(&v.languages, &o.languages),
                     preview_url: keep(&v.preview_url, &o.preview_url),

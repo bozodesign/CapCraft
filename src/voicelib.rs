@@ -179,6 +179,7 @@ pub fn read_voice(x: &serde_json::Value) -> Option<Voice> {
         preview_url: text(x, "preview_url"),
         owner: text(x, "public_owner_id"),
         favorite: false,
+        category: text(x, "category").to_lowercase(),
     })
 }
 
@@ -412,9 +413,36 @@ pub fn split_name(name: &str) -> (&str, &str) {
     (name.trim(), "")
 }
 
-/// The order cards are shown in: voices made here first, then by name A–Z (any case).
+/// The original files every voice under two levels: a category (`tone_category_name`) and,
+/// inside it, a second category (`tone_second_category_name`), and marks voices a person made
+/// (`is_ugc`) and cloned (`is_ai_clone_tone`) (videoeditor.dll PersistentDigitalHumanVoiceInfo
+/// from_json 0x180c41e70). Here the first level is the voice's kind, in this order.
+pub const GROUPS: [(&str, &str); 6] = [
+    ("generated", "Made by you"),
+    ("cloned", "Cloned"),
+    ("premade", "ElevenLabs voices"),
+    ("professional", "Professional"),
+    ("high_quality", "High quality"),
+    ("famous", "Famous"),
+];
+
+/// A voice's first-level group: its place in GROUPS (others after them, A–Z) and its heading.
+pub fn group_of(v: &Voice) -> (usize, String) {
+    let c = if v.designed { "generated" } else { v.category.as_str() };
+    match GROUPS.iter().position(|(k, _)| *k == c) {
+        Some(i) => (i, GROUPS[i].1.to_string()),
+        None if c.is_empty() => (GROUPS.len() + 1, "Other voices".to_string()),
+        None => (GROUPS.len(), pretty(c)),
+    }
+}
+
+/// The order cards are shown in: by group, then by name A–Z (any case). The original's second
+/// level (what the voice is for) is the Style filter here, so the cards in a group stay A–Z.
 pub fn sort_voices(list: &mut [Voice]) {
-    list.sort_by(|a, b| b.designed.cmp(&a.designed).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+    list.sort_by_cached_key(|v| {
+        let (rank, head) = group_of(v);
+        (rank, head.to_lowercase(), v.name.to_lowercase())
+    });
 }
 
 fn chip(ui: &mut egui::Ui, s: &str, fill: Color32) {
@@ -633,7 +661,22 @@ impl crate::app::App {
                 let avail = ui.available_width() - 4.0;
                 let cols = ((avail + CARD_GAP) / (CARD_W + CARD_GAP)).floor().max(1.0) as usize;
                 let w = ((avail - CARD_GAP * (cols as f32 - 1.0)) / cols as f32).floor();
-                for row in list.chunks(cols) {
+                // runs of voices in the same group, each under its heading
+                let mut groups: Vec<(String, Vec<Voice>)> = Vec::new();
+                for v in &list {
+                    let head = group_of(v).1;
+                    match groups.last_mut() {
+                        Some((h, vs)) if *h == head => vs.push(v.clone()),
+                        _ => groups.push((head, vec![v.clone()])),
+                    }
+                }
+                for (head, members) in &groups {
+                if groups.len() > 1 {
+                    ui.add_space(2.0);
+                    ui.label(RichText::new(format!("{head}  ·  {}", members.len())).strong().size(12.0).color(MUTED));
+                    ui.add_space(2.0);
+                }
+                for row in members.chunks(cols) {
                     let (row_rect, _) = ui.allocate_exact_size(egui::vec2(avail, CARD_H), egui::Sense::hover());
                     for (c, v) in row.iter().enumerate() {
                         let cell = egui::Rect::from_min_size(row_rect.min + egui::vec2(c as f32 * (w + CARD_GAP), 0.0), egui::vec2(w, CARD_H));
@@ -755,6 +798,7 @@ impl crate::app::App {
                     }
                     ui.add_space(CARD_GAP - ui.spacing().item_spacing.y);
                 }
+                }
             });
         });
         if !open {
@@ -846,13 +890,21 @@ mod tests {
         assert_eq!(split_name("Roger - Laid-Back, Casual"), ("Roger", "Laid-Back, Casual"));
         assert_eq!(split_name("Will"), ("Will", ""));
         assert_eq!(split_name("Alana – British, Podcasts"), ("Alana", "British, Podcasts"));
+        // grouped like the original: by kind, then by name
         let mut list = vec![
-            Voice { name: "sarah".into(), ..Default::default() },
-            Voice { name: "Alice".into(), ..Default::default() },
+            Voice { name: "sarah".into(), category: "premade".into(), style: "news".into(), ..Default::default() },
+            Voice { name: "Alice".into(), category: "premade".into(), style: "news".into(), ..Default::default() },
+            Voice { name: "Bob".into(), category: "premade".into(), style: "conversational".into(), ..Default::default() },
+            Voice { name: "Me".into(), category: "cloned".into(), ..Default::default() },
             Voice { name: "Zed".into(), designed: true, ..Default::default() },
+            Voice { name: "Old".into(), ..Default::default() },
         ];
         sort_voices(&mut list);
-        assert_eq!(list.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(), vec!["Zed", "Alice", "sarah"]);
+        assert_eq!(list.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(), vec!["Zed", "Me", "Alice", "Bob", "sarah", "Old"]);
+        assert_eq!(group_of(&list[0]).1, "Made by you");
+        assert_eq!(group_of(&list[5]).1, "Other voices");
+        let read: serde_json::Value = serde_json::from_str(r#"{"voice_id":"c1","name":"Me","category":"Cloned"}"#).unwrap();
+        assert_eq!(read_voice(&read).unwrap().category, "cloned");
         let rest: Vec<&str> = LANGUAGES[COMMON_LANGUAGES..].iter().map(|(_, n)| *n).collect();
         let mut sorted = rest.clone();
         sorted.sort();
