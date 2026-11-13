@@ -222,7 +222,7 @@ pub fn read_voice(x: &serde_json::Value) -> Option<Voice> {
         owner: text(x, "public_owner_id"),
         favorite: false,
         category: text(x, "category").to_lowercase(),
-        image_url: text(x, "image_url"),
+        image_url: picture_of(x),
     })
 }
 
@@ -399,6 +399,31 @@ pub fn load_image(id: &str, url: &str) -> Result<egui::ColorImage, String> {
     let img = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
     let img = img.resize_to_fill(IMAGE_PX, IMAGE_PX, image::imageops::FilterType::Triangle).to_rgba8();
     Ok(egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw()))
+}
+
+/// Where a voice's picture can be, looked at in this order; the first one there wins. The
+/// original does the same for its voices' `tone_avatar_url`, looking in `web_extra`, then
+/// `biz_extra`, then `extra`, and shows the voice's ordinary cover when none has one
+/// (lyra_cli_client.dll FUN_180622c40, used by FUN_18061e140 for voices, effect_type 11).
+/// ElevenLabs keeps it at the top for shared voices and under `sharing` for the account's.
+pub const PICTURE_PLACES: [&[&str]; 2] = [&["image_url"], &["sharing", "image_url"]];
+
+/// A voice's picture address: the first place in PICTURE_PLACES that has one ("" for none,
+/// when the card shows its first letter instead).
+pub fn picture_of(x: &serde_json::Value) -> String {
+    for place in PICTURE_PLACES {
+        let mut v = x;
+        for k in place {
+            v = match v.get(*k) {
+                Some(n) => n,
+                None => &serde_json::Value::Null,
+            };
+        }
+        if let Some(u) = v.as_str().map(str::trim).filter(|u| !u.is_empty()) {
+            return u.to_string();
+        }
+    }
+    String::new()
 }
 
 /// A colour of a voice's own for its picture when it has none (the same every time).
@@ -1054,6 +1079,12 @@ mod tests {
         assert_eq!(ch.len(), ACCENTS.len() + 1);
         assert_eq!(ch.last().unwrap(), &("new_zealand".to_string(), "New zealand".to_string()));
         assert_eq!((ACCENTS[1].0, ACCENTS[2].0), ("american", "british"));
+        // a picture: the first place that has one, as the original looks for a voice's avatar
+        let a: serde_json::Value = serde_json::from_str(r#"{"image_url":"https://a/1.jpg","sharing":{"image_url":"https://a/2.jpg"}}"#).unwrap();
+        assert_eq!(picture_of(&a), "https://a/1.jpg");
+        let b: serde_json::Value = serde_json::from_str(r#"{"image_url":"","sharing":{"image_url":"https://a/2.jpg"}}"#).unwrap();
+        assert_eq!(picture_of(&b), "https://a/2.jpg");
+        assert_eq!(picture_of(&serde_json::json!({"sharing": null})), "");
         // a picture's colour is the voice's own, every time
         assert_eq!(avatar_fill("abc"), avatar_fill("abc"));
         // languages: its own, then the ones ElevenLabs checked; English first and Thai second
