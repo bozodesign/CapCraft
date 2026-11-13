@@ -59,7 +59,7 @@ fn main() -> eframe::Result<()> {
     // --export-test <file.mp4>: write the sample project to a video without a window (a self-check)
     if let Some(k) = args.iter().position(|a| a == "--export-test") {
         let out = PathBuf::from(args.get(k + 1).cloned().unwrap_or_else(|| "export-test.mp4".into()));
-        let settings = export::Settings { path: out, short_side: 720, fps: 30.0, quality: export::Quality::Recommended, kbps: export::CUSTOM_KBPS_DEFAULT, constant: false, audio: true, audio_kbps: export::AUDIO_KBPS[0] };
+        let settings = export::Settings { path: out, short_side: 720, fps: 30.0, quality: export::Quality::Recommended, kbps: export::CUSTOM_KBPS_DEFAULT, constant: false, audio: true, audio_kbps: export::AUDIO_KBPS[0], cover: None };
         let started = std::time::Instant::now();
         let st = export::start(app::sample_project(), Default::default(), std::sync::Arc::new(media::ImageStore::default()), settings);
         loop {

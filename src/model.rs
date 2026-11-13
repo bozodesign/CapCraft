@@ -1627,6 +1627,20 @@ pub struct Project {
     pub next_id: u64,
     /// Editing one caption's style changes every caption.
     pub captions_share_style: bool,
+    /// The video's cover, set from the main track's cover button and saved into every export.
+    #[serde(default)]
+    pub cover: Option<ProjectCover>,
+}
+
+/// A project's cover, as the original keeps it: its kind by saved name ("frame": a moment of the
+/// video, "image": a picture; see `cover::Kind`), the moment for a frame and the picture's file.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+pub struct ProjectCover {
+    pub kind: String,
+    #[serde(default)]
+    pub at: f64,
+    #[serde(default)]
+    pub picture: Option<std::path::PathBuf>,
 }
 
 /// Whether two clips cover some of the same time. Touching ends don't count: the original's
@@ -1653,6 +1667,7 @@ impl Project {
             tracks: vec![],
             next_id: 1,
             captions_share_style: true,
+            cover: None,
         };
         let id = p.new_id();
         p.tracks.push(Track { id, kind: TrackKind::Main, clips: vec![], muted: false, hidden: false, locked: false });

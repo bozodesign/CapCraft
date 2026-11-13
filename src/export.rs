@@ -111,6 +111,8 @@ pub struct Settings {
     pub constant: bool,
     pub audio: bool,
     pub audio_kbps: u32,
+    /// The project's cover, saved inside the video once it is written.
+    pub cover: Option<crate::cover::Source>,
 }
 
 #[derive(Default, Clone)]
@@ -121,6 +123,9 @@ pub struct Status {
     pub cancel: bool,
     pub eta_secs: f64,
     pub out_path: String,
+    /// The cover went into the video; or why it couldn't (the video itself is still fine).
+    pub cover_added: bool,
+    pub cover_error: Option<String>,
 }
 
 pub fn output_size(p: &Project, short_side: u32) -> (usize, usize) {
@@ -149,6 +154,17 @@ impl Sources for SyncSources {
     }
 }
 
+/// One frame of the project at `t` seconds, its longest side at most `max_side` pixels.
+pub fn still(p: &Project, images: Arc<ImageStore>, t: f64, max_side: usize) -> Frame {
+    let (w, h) = output_size(p, 1080);
+    let s = (max_side as f64 / w.max(h) as f64).min(1.0);
+    let (w, h) = (((w as f64 * s) as usize).max(2) & !1, ((h as f64 * s) as usize).max(2) & !1);
+    let mut renderer = Renderer::new();
+    let mut src = SyncSources { readers: HashMap::new(), images };
+    let (frame, _) = renderer.render(p, t.clamp(0.0, p.duration().max(0.0)), w, h, &mut src);
+    frame
+}
+
 /// Draw one small frame of the project (the cover on the projects screen) to a PNG.
 pub fn write_cover(p: &Project, images: Arc<ImageStore>, path: &std::path::Path) -> Result<(), String> {
     let dur = p.duration();
@@ -171,12 +187,22 @@ pub fn start(p: Project, pcm: HashMap<u64, Arc<Vec<i16>>>, images: Arc<ImageStor
     let st = status.clone();
     std::thread::spawn(move || {
         let res = run(&p, &pcm, images, &s, &st);
+        // the project's cover goes in once the video is written; if it can't, the video stays
+        let cover = match (&res, &s.cover) {
+            (Ok(()), Some(src)) => Some(crate::cover::put_in(&s.path, src)),
+            _ => None,
+        };
         let mut g = st.lock().unwrap_or_else(|e| e.into_inner());
         g.done = true;
         if let Err(e) = res {
             g.error = Some(e);
         } else {
             g.progress = 1.0;
+        }
+        match cover {
+            Some(Ok(())) => g.cover_added = true,
+            Some(Err(e)) => g.cover_error = Some(e),
+            None => {}
         }
     });
     status
@@ -265,7 +291,7 @@ mod tests {
     use super::*;
 
     fn custom(short_side: u32, kbps: u32, constant: bool) -> Settings {
-        Settings { path: PathBuf::from("x.mp4"), short_side, fps: 30.0, quality: Quality::Custom, kbps, constant, audio: false, audio_kbps: 192 }
+        Settings { path: PathBuf::from("x.mp4"), short_side, fps: 30.0, quality: Quality::Custom, kbps, constant, audio: false, audio_kbps: 192, cover: None }
     }
 
     #[test]

@@ -1983,6 +1983,33 @@ impl App {
         }
     }
 
+    /// The cover button at the right end of the main track's header (left of time 0), as in the
+    /// original: click to edit the cover; hovered, the player shows the cover and a remove button
+    /// appears over its corner.
+    fn cover_button(&mut self, ui: &mut egui::Ui, header: Rect, y: f32) {
+        use crate::cover;
+        let b = Rect::from_min_size(pos2(header.right() - cover::BUTTON_RIGHT - cover::BUTTON, y - cover::BUTTON / 2.0), vec2(cover::BUTTON, cover::BUTTON));
+        let has = self.project.cover.is_some();
+        let resp = ui.interact(b, ui.id().with("cover-button"), egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        let rr = cover::remove_rect(b);
+        let near = ui.input(|i| i.pointer.hover_pos()).map(|p| b.contains(p) || rr.contains(p)).unwrap_or(false);
+        let painter = ui.painter().with_clip_rect(header.expand2(vec2(cover::REMOVE_OUT.0 + 1.0, 0.0)));
+        cover::paint_button(&painter, b, if has { self.cover_thumb.tex.as_ref() } else { None }, resp.hovered());
+        let mut removed = false;
+        if has && near {
+            let r = ui.interact(rr, ui.id().with("cover-remove"), egui::Sense::click()).on_hover_text("Remove the cover");
+            cover::paint_remove(&painter, rr, r.hovered());
+            removed = r.clicked();
+        }
+        let resp = resp.on_hover_text(if has { "Click to edit the cover" } else { "Click to add a cover" });
+        self.cover_peek = has && near && !removed;
+        if removed {
+            self.project.cover = None;
+        } else if resp.clicked() {
+            self.cover_editor.open_on(self.project.cover.as_ref());
+        }
+    }
+
     fn draw_headers(&mut self, ui: &mut egui::Ui, header: Rect, rows: &[Row]) {
         let painter = ui.painter_at(header);
         painter.rect_filled(header, 0.0, BG1);
@@ -1993,6 +2020,7 @@ impl App {
                 continue;
             }
             let tr = &self.project.tracks[row.ti];
+            let (locked, hidden, muted) = (tr.locked, tr.hidden, tr.muted);
             let (icon, name) = match row.kind {
                 TrackKind::Main => ("🎞", "Main"),
                 TrackKind::Overlay => ("🖼", "Overlay"),
@@ -2000,25 +2028,32 @@ impl App {
                 TrackKind::Audio => ("♪", "Audio"),
             };
             let y = row.rect.center().y;
-            painter.text(pos2(header.left() + 10.0, y), Align2::LEFT_CENTER, format!("{icon} {name}"), FontId::proportional(11.5), MUTED);
+            // the main track keeps its right end for the cover button, so its name and switches
+            // stack on the left
+            let main = row.kind == TrackKind::Main;
+            let (name_y, btn_y) = if main { (y - 12.0, y + 11.0) } else { (y, y) };
+            painter.text(pos2(header.left() + 10.0, name_y), Align2::LEFT_CENTER, format!("{icon} {name}"), FontId::proportional(11.5), MUTED);
             if row.rect.top() < header.top() || row.rect.bottom() > header.bottom() {
                 continue;
             }
-            let mut x = header.right() - 8.0;
+            if main {
+                self.cover_button(ui, header, y);
+            }
+            let (mut x, step) = if main { (header.left() + 10.0 + 20.0, -22.0) } else { (header.right() - 8.0, 22.0) };
             let mut btn = |ui: &mut egui::Ui, label: &str, on: bool, tip: &str, code: u8, toggles: &mut Vec<(usize, u8)>| {
-                let r = Rect::from_center_size(pos2(x - 10.0, y), vec2(20.0, 20.0));
-                x -= 22.0;
+                let r = Rect::from_center_size(pos2(x - 10.0, btn_y), vec2(20.0, 20.0));
+                x -= step;
                 let t = RichText::new(label).size(12.0).color(if on { Color32::from_rgb(255, 150, 90) } else { MUTED });
                 if ui.put(r, egui::Button::new(t).frame(false)).on_hover_text(tip).clicked() {
                     toggles.push((row.ti, code));
                 }
             };
-            btn(ui, if tr.locked { "🔒" } else { "🔓" }, tr.locked, "Lock the track", 0, &mut toggles);
+            btn(ui, if locked { "🔒" } else { "🔓" }, locked, "Lock the track", 0, &mut toggles);
             if row.kind != TrackKind::Audio {
-                btn(ui, "👁", tr.hidden, "Hide the track", 1, &mut toggles);
+                btn(ui, "👁", hidden, "Hide the track", 1, &mut toggles);
             }
             if row.kind != TrackKind::Text {
-                btn(ui, if tr.muted { "🔇" } else { "🔊" }, tr.muted, "Mute the track", 2, &mut toggles);
+                btn(ui, if muted { "🔇" } else { "🔊" }, muted, "Mute the track", 2, &mut toggles);
             }
         }
         for (ti, code) in toggles {

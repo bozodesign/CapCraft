@@ -136,10 +136,11 @@ pub struct App {
 
     pub export_dialog: Option<ExportDialog>,
     pub export_status: Option<Arc<Mutex<export::Status>>>,
-    /// The cover being made for the video just exported.
-    pub export_cover: Option<crate::cover::Cover>,
-    /// The kind of cover last chosen (its saved name), so the next export starts there.
-    pub cover_kind: &'static str,
+    /// The cover editor (from the cover button on the main track) and the cover's picture there.
+    pub cover_editor: crate::cover::Editor,
+    pub cover_thumb: crate::cover::Picture,
+    /// The cover button is hovered: the player shows the cover, as the original's does.
+    pub cover_peek: bool,
     pub toast: Option<(String, Instant)>,
     pub project_path: Option<PathBuf>,
     pub show_shortcuts: bool,
@@ -395,8 +396,9 @@ impl App {
             gizmo: None,
             export_dialog: None,
             export_status: None,
-            export_cover: None,
-            cover_kind: crate::cover::DEFAULT_KIND.name(),
+            cover_editor: Default::default(),
+            cover_thumb: Default::default(),
+            cover_peek: false,
             toast: None,
             project_path: None,
             show_shortcuts: false,
@@ -451,11 +453,6 @@ impl App {
             if let Some(v) = std::env::var_os("CUTSTUDIO_SHOT_LIBRARY") {
                 app.open_voice_library(if v == "person" { Some(0) } else { None });
             }
-            // the finished-export window for a video already made, with its cover part
-            if let Some(v) = std::env::var_os("CUTSTUDIO_SHOT_COVER") {
-                app.open_export();
-                app.export_status = Some(Arc::new(Mutex::new(export::Status { done: true, progress: 1.0, out_path: v.to_string_lossy().into(), ..Default::default() })));
-            }
         }
         app.build_filter_previews(&cc.egui_ctx);
         match open {
@@ -468,6 +465,14 @@ impl App {
             None => app.load_sample(),
         }
         if app.screenshot.is_some() {
+            // the cover editor ("frame" or "image" opens it on such a cover; "set" only sets one)
+            if let Some(v) = std::env::var_os("CUTSTUDIO_SHOT_COVER") {
+                let kind = if v == "image" { "image" } else { "frame" };
+                app.project.cover = Some(crate::model::ProjectCover { kind: kind.into(), at: 6.0, picture: None });
+                if v != "set" {
+                    app.cover_editor.open_on(app.project.cover.as_ref());
+                }
+            }
             // CUTSTUDIO_SHOT_THAI=1: Thai in the project name and in every text, the first one selected
             if std::env::var_os("CUTSTUDIO_SHOT_THAI").is_some() {
                 app.project.name = "งานตัดต่อ ปู่ฟ้า".into();
@@ -1954,19 +1959,6 @@ impl App {
         let status = self.export_status.as_ref().map(|s| (s.clone(), s.lock().unwrap_or_else(|e| e.into_inner()).clone()));
         let duration = self.project.duration();
         let sizes: Vec<(usize, usize)> = export::RESOLUTIONS.iter().map(|r| export::output_size(&self.project, r.1)).collect();
-        // a finished video can be given a cover
-        match &status {
-            Some((_, s)) if s.done && s.error.is_none() => {
-                let video = PathBuf::from(&s.out_path);
-                if self.export_cover.as_ref().map(|c| c.video != video).unwrap_or(true) {
-                    self.export_cover = Some(crate::cover::Cover::new(video, duration, self.cover_kind));
-                }
-                if let Some(c) = &self.export_cover {
-                    self.cover_kind = c.kind.name();
-                }
-            }
-            _ => self.export_cover = None,
-        }
         egui::Window::new("Export").collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).open(&mut open).show(ctx, |ui| {
             ui.set_width(380.0);
             if let Some((st, s)) = &status {
@@ -1990,9 +1982,11 @@ impl App {
                         if ui.button("📂").on_hover_text("Show in folder").clicked() {
                             let _ = std::process::Command::new("explorer").arg(format!("/select,{}", s.out_path)).spawn();
                         }
-                        if let Some(c) = self.export_cover.as_mut() {
-                            ui.separator();
-                            c.ui(ui);
+                        if s.cover_added {
+                            ui.label(egui::RichText::new("With its cover").color(MUTED).size(11.0));
+                        }
+                        if let Some(e) = &s.cover_error {
+                            ui.colored_label(Color32::from_rgb(240, 120, 110), e);
                         }
                     }
                 }
@@ -2087,7 +2081,7 @@ impl App {
                     name = "video".into();
                 }
                 let path = d.folder.join(format!("{name}.mp4"));
-                start = Some(export::Settings { path, short_side: export::RESOLUTIONS[d.res].1, fps: export::FRAME_RATES[d.fps], quality: d.quality, kbps: d.kbps, constant: d.constant, audio: d.audio, audio_kbps: export::AUDIO_KBPS[d.audio_kbps] });
+                start = Some(export::Settings { path, short_side: export::RESOLUTIONS[d.res].1, fps: export::FRAME_RATES[d.fps], quality: d.quality, kbps: d.kbps, constant: d.constant, audio: d.audio, audio_kbps: export::AUDIO_KBPS[d.audio_kbps], cover: self.project.cover.as_ref().and_then(crate::cover::Source::of) });
             }
         });
         if again {
@@ -2110,7 +2104,6 @@ impl App {
             }
             self.export_dialog = None;
             self.export_status = None;
-            self.export_cover = None;
         }
     }
 
@@ -2390,6 +2383,13 @@ impl App {
         self.render_preview(&ctx, pw, ph);
         if let Some(tex) = &self.preview_tex {
             ui.painter().image(tex.id(), img_rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+        }
+        // while the cover button is hovered, the player shows the cover
+        if let (true, Some(tex)) = (self.cover_peek, &self.cover_thumb.tex) {
+            let sz = tex.size_vec2();
+            let s = (img_rect.width() / sz.x).min(img_rect.height() / sz.y);
+            ui.painter().rect_filled(img_rect, 0.0, Color32::BLACK);
+            ui.painter().image(tex.id(), Rect::from_center_size(img_rect.center(), sz * s), Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
         }
         if self.project.duration() <= 0.0 {
             ui.painter().text(img_rect.center(), Align2::CENTER_CENTER, "Import media and drag it to the timeline", FontId::proportional(15.0), MUTED);
@@ -2710,6 +2710,10 @@ impl App {
         self.layouts.dock = Some(dock);
 
         self.export_window(ctx);
+        if let Some(c) = self.cover_editor.window(ctx, &self.project, &self.images, self.revision) {
+            self.project.cover = c;
+        }
+        self.cover_thumb.poll(ctx, self.project.cover.as_ref(), &self.project, &self.images, self.revision, crate::cover::THUMB_SIDE, "cover-thumb");
         self.shortcuts_window(ctx);
         self.settings_window(ctx);
         self.voice_window(ctx);

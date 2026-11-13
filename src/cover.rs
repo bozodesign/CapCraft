@@ -1,10 +1,12 @@
-//! A cover for a finished video: one picture saved inside the MP4 as its attached picture, which
-//! file managers, players and sharing sites show as the video's thumbnail. Made after export, from
-//! a frame of the video itself or from any picture, without encoding the video again.
+//! The project's cover, as in the original: set from the cover button at the start of the main
+//! track (left of time 0), kept in the project, and saved into every export as the MP4's attached
+//! picture, which file managers, players and sharing sites show as the video's thumbnail. The
+//! video is not encoded again for it.
 
-use crate::media::{ffmpeg, quiet_command};
-use crate::theme::{self, ACCENT, MUTED};
-use egui::{Color32, ColorImage, RichText, TextureHandle, TextureOptions};
+use crate::media::{ffmpeg, quiet_command, ImageStore};
+use crate::model::{Project, ProjectCover};
+use crate::theme::{self, MUTED};
+use egui::{Align2, Color32, ColorImage, RichText, TextureHandle, TextureOptions};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -55,14 +57,43 @@ pub const DEFAULT_AT: f64 = 0.0;
 pub const MAX_SIDE: u32 = 1920;
 /// JPEG quality of the saved cover (FFmpeg's scale: 2 is near the best, 31 the worst).
 pub const JPEG_QUALITY: u32 = 2;
-/// The preview's longest side in the window (pixels).
-pub const PREVIEW_SIDE: u32 = 320;
 
-/// Where the cover comes from.
+/// The cover button on the main track's header, as the original's (MainTrack QML `coverItem`):
+/// 38 x 38, 8 from the header's right edge, centred on the track, corners 4, a dashed 1-px edge
+/// (dashes 1 on, 3 off) while there's no cover, an 18-px edit sign; with a cover, the picture
+/// fills it (cropped) under the edit sign.
+pub const BUTTON: f32 = 38.0;
+pub const BUTTON_RIGHT: f32 = 8.0;
+pub const BUTTON_RADIUS: u8 = 4;
+pub const BUTTON_DASH: (f32, f32) = (1.0, 3.0);
+pub const EDIT_SIGN: f32 = 18.0;
+/// The remove button shown over a cover's top-right corner on hover: 12 x 12, red #AE1C1C, 6 above
+/// the corner and 4 past it.
+pub const REMOVE: f32 = 12.0;
+pub const REMOVE_COLOUR: Color32 = Color32::from_rgb(0xAE, 0x1C, 0x1C);
+pub const REMOVE_OUT: (f32, f32) = (4.0, 6.0);
+/// The button's fill (the original's Fill_Background_Level5) and dashed edge (Alpha10W_White_01).
+pub const BUTTON_FILL: Color32 = Color32::from_rgb(0x2E, 0x2E, 0x2E);
+pub const BUTTON_EDGE: Color32 = Color32::from_rgba_premultiplied(0x1A, 0x1A, 0x1A, 0x1A);
+/// The pictures shown: the button's (and the hover preview's) and the editor's longest side.
+pub const THUMB_SIDE: usize = 480;
+pub const PREVIEW_SIDE: usize = 480;
+
+/// Where an export's cover comes from.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Source {
+    /// This moment of the exported video.
     Frame(f64),
     Picture(PathBuf),
+}
+
+impl Source {
+    pub fn of(c: &ProjectCover) -> Option<Source> {
+        match Kind::from_name(&c.kind) {
+            Kind::Image | Kind::WebCover => c.picture.clone().map(Source::Picture),
+            Kind::Frame => Some(Source::Frame(c.at)),
+        }
+    }
 }
 
 fn shrink() -> String {
@@ -104,23 +135,46 @@ fn run(args: &[String]) -> Result<(), String> {
     }
 }
 
-/// Make the cover picture at `out` and a small copy of it to show.
-pub fn make(video: &Path, src: &Source, out: &Path) -> Result<ColorImage, String> {
-    run(&make_args(video, src, out))?;
-    let img = image::open(out).map_err(|e| format!("Couldn't read the cover: {e}"))?;
-    let small = img.thumbnail(PREVIEW_SIDE, PREVIEW_SIDE).to_rgba8();
-    Ok(ColorImage::from_rgba_unmultiplied([small.width() as usize, small.height() as usize], small.as_raw()))
-}
+static NEXT: AtomicU64 = AtomicU64::new(0);
 
-/// Put `picture` into `video` as its cover. The video is written beside itself first and only
+/// Put the cover into a finished video. The video is written beside itself first and only
 /// replaces the old file when that worked.
-pub fn attach(video: &Path, picture: &Path) -> Result<(), String> {
+pub fn put_in(video: &Path, src: &Source) -> Result<(), String> {
+    let pic = std::env::temp_dir().join(format!("capcraft-cover-{}-{}.jpg", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
     let tmp = video.with_extension("cover-tmp.mp4");
-    let r = run(&attach_args(video, picture, &tmp)).and_then(|_| std::fs::rename(&tmp, video).map_err(|e| format!("Couldn't replace the video (is it open somewhere?): {e}")));
+    let r = run(&make_args(video, src, &pic))
+        .and_then(|_| run(&attach_args(video, &pic, &tmp)))
+        .and_then(|_| std::fs::rename(&tmp, video).map_err(|e| format!("Couldn't replace the video: {e}")));
+    let _ = std::fs::remove_file(&pic);
     if r.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
-    r
+    r.map_err(|e| format!("The cover couldn't be added: {e}"))
+}
+
+fn to_image(rgba: &image::RgbaImage) -> ColorImage {
+    ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw())
+}
+
+/// The cover as a picture to show, its longest side at most `side`: the project's frame at that
+/// moment, or the chosen picture.
+pub fn picture_of(c: &ProjectCover, p: &Project, images: Arc<ImageStore>, side: usize) -> Result<ColorImage, String> {
+    match Source::of(c) {
+        Some(Source::Picture(path)) => {
+            let img = image::open(&path).map_err(|e| format!("Couldn't read the picture: {e}"))?;
+            Ok(to_image(&img.thumbnail(side as u32, side as u32).to_rgba8()))
+        }
+        Some(Source::Frame(t)) => {
+            let f = crate::export::still(p, images, t, side);
+            let mut data = f.data;
+            // the cover is opaque, as in the video
+            for px in data.chunks_exact_mut(4) {
+                px[3] = 255;
+            }
+            Ok(ColorImage::from_rgba_unmultiplied([f.w, f.h], &data))
+        }
+        None => Err("No picture chosen".into()),
+    }
 }
 
 type Task<T> = Arc<Mutex<Option<Result<T, String>>>>;
@@ -139,171 +193,205 @@ fn take<T>(t: &Task<T>) -> Option<Result<T, String>> {
     t.lock().unwrap_or_else(|e| e.into_inner()).take()
 }
 
-static NEXT: AtomicU64 = AtomicU64::new(0);
-
-/// The cover part of the finished-export window, for one video.
-pub struct Cover {
-    pub video: PathBuf,
-    pub duration: f64,
-    pub kind: Kind,
-    pub at: f64,
-    pub picture: Option<PathBuf>,
-    /// The cover picture made for the current choice, and its preview.
-    made: Option<(Source, PathBuf)>,
-    preview: Option<TextureHandle>,
-    making: Option<(Source, PathBuf, Task<ColorImage>)>,
-    attaching: Option<Task<()>>,
-    /// Whether the choice changed since the last picture was made.
-    stale: bool,
-    note: Option<(bool, String)>,
+/// A picture of a cover kept up to date in the background: made again when the cover changes
+/// and, for a frame, when the project is edited (`edits` counts the edits).
+#[derive(Default)]
+pub struct Picture {
+    shown: Option<(ProjectCover, u64)>,
+    pub tex: Option<TextureHandle>,
+    making: Option<((ProjectCover, u64), Task<ColorImage>)>,
 }
 
-impl Cover {
-    /// A cover for `video`, starting with the kind of cover last used (by its saved name).
-    pub fn new(video: PathBuf, duration: f64, last_kind: &str) -> Cover {
-        let kind = match Kind::from_name(last_kind) {
-            Kind::WebCover => DEFAULT_KIND,
-            k => k,
-        };
-        Cover { video, duration, kind, at: DEFAULT_AT, picture: None, made: None, preview: None, making: None, attaching: None, stale: true, note: None }
-    }
-
-    fn source(&self) -> Option<Source> {
-        match self.kind {
-            Kind::Frame => Some(Source::Frame(self.at)),
-            Kind::Image | Kind::WebCover => self.picture.clone().map(Source::Picture),
-        }
-    }
-
-    fn poll(&mut self, ctx: &egui::Context) {
-        if let Some((src, path, t)) = &self.making {
+impl Picture {
+    /// Keep the picture in step with `cover`; `side` is its longest side.
+    pub fn poll(&mut self, ctx: &egui::Context, cover: Option<&ProjectCover>, p: &Project, images: &Arc<ImageStore>, edits: u64, side: usize, id: &str) {
+        if let Some((key, t)) = &self.making {
             if let Some(r) = take(t) {
-                let (src, path) = (src.clone(), path.clone());
+                let key = key.clone();
                 self.making = None;
-                match r {
-                    Ok(img) => {
-                        if let Some((_, old)) = self.made.replace((src, path)) {
-                            let _ = std::fs::remove_file(old);
-                        }
-                        self.preview = Some(ctx.load_texture("export-cover", img, TextureOptions::LINEAR));
-                    }
-                    Err(e) => {
-                        let _ = std::fs::remove_file(&path);
-                        self.note = Some((false, e));
-                    }
-                }
+                self.tex = r.ok().map(|img| ctx.load_texture(id, img, TextureOptions::LINEAR));
+                self.shown = Some(key);
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
             }
         }
-        if let Some(t) = &self.attaching {
-            if let Some(r) = take(t) {
-                self.attaching = None;
-                self.note = Some(match r {
-                    Ok(()) => (true, "✔ Cover added to the video".into()),
-                    Err(e) => (false, e),
-                });
-            }
-        }
-        // make the picture for the latest choice once nothing else is being made
-        if self.stale && self.making.is_none() {
-            if let Some(src) = self.source() {
-                self.stale = false;
-                if self.made.as_ref().map(|(s, _)| s != &src).unwrap_or(true) {
-                    let out = std::env::temp_dir().join(format!("capcraft-cover-{}-{}.jpg", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
-                    let (v, s2, o2) = (self.video.clone(), src.clone(), out.clone());
-                    self.making = Some((src, out, task(move || make(&v, &s2, &o2))));
-                }
-            }
-        }
-        if self.making.is_some() || self.attaching.is_some() {
+        let Some(c) = cover else {
+            self.shown = None;
+            self.tex = None;
+            return;
+        };
+        let gen = if Kind::from_name(&c.kind) == Kind::Frame { edits } else { 0 };
+        let want = (c.clone(), gen);
+        if self.making.is_none() && self.shown.as_ref() != Some(&want) {
+            let (c2, p2, im) = (c.clone(), p.clone(), images.clone());
+            self.making = Some((want, task(move || picture_of(&c2, &p2, im, side))));
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui) {
-        self.poll(ui.ctx());
-        let busy = self.attaching.is_some();
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Cover").strong());
-            theme::hint(ui, "Saves a picture inside the video as its cover: the thumbnail file managers, players and sharing sites show. The video itself isn't encoded again. Adding another cover replaces this one.");
-        });
-        ui.add_enabled_ui(!busy, |ui| {
+    /// Whether the picture shows an older choice than `cover` while a newer one is made.
+    pub fn busy(&self) -> bool {
+        self.making.is_some()
+    }
+}
+
+/// The cover editor, opened from the cover button.
+#[derive(Default)]
+pub struct Editor {
+    pub open: bool,
+    choice: Option<ProjectCover>,
+    /// The frame slider is let go (a new picture is made then, not on every step of a drag).
+    settled: Option<ProjectCover>,
+    picture: Picture,
+}
+
+impl Editor {
+    /// Open the editor on the project's cover, or a new one.
+    pub fn open_on(&mut self, current: Option<&ProjectCover>) {
+        let c = current.cloned().unwrap_or(ProjectCover { kind: DEFAULT_KIND.name().into(), at: DEFAULT_AT, picture: None });
+        self.settled = Some(c.clone());
+        self.choice = Some(c);
+        self.open = true;
+    }
+
+    /// The editor window. Returns the project's new cover when it's saved (`Some(None)` removes it).
+    pub fn window(&mut self, ctx: &egui::Context, p: &Project, images: &Arc<ImageStore>, edits: u64) -> Option<Option<ProjectCover>> {
+        if !self.open {
+            return None;
+        }
+        let mut result = None;
+        let mut open = true;
+        let had = p.cover.is_some();
+        let duration = p.duration();
+        let shown = self.settled.clone().filter(|c| Source::of(c).is_some());
+        self.picture.poll(ctx, shown.as_ref(), p, images, edits, PREVIEW_SIDE, "cover-editor");
+        egui::Window::new("Cover").collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, egui::Vec2::ZERO).open(&mut open).show(ctx, |ui| {
+            ui.set_width(380.0);
+            let Some(c) = self.choice.as_mut() else { return };
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("The video's cover").strong());
+                theme::hint(ui, "Saved inside every video you export: the thumbnail file managers, players and sharing sites show. Pick a moment of the video or any picture.");
+            });
+            let kind = Kind::from_name(&c.kind);
             ui.horizontal(|ui| {
                 for k in OFFERED {
-                    if ui.selectable_label(self.kind == k, k.label()).clicked() && self.kind != k {
-                        self.kind = k;
-                        self.stale = true;
-                        self.note = None;
+                    let on = kind == k || (k == Kind::Image && kind == Kind::WebCover);
+                    if ui.selectable_label(on, k.label()).clicked() && !on {
+                        c.kind = k.name().into();
+                        self.settled = Some(c.clone());
                     }
                 }
             });
-            match self.kind {
+            match kind {
                 Kind::Frame => {
-                    let end = (self.duration - 0.05).max(0.0);
                     ui.spacing_mut().slider_width = ui.available_width();
-                    let r = ui.add(egui::Slider::new(&mut self.at, 0.0..=end).show_value(false)).on_hover_text("Which moment of the video becomes the cover");
-                    ui.label(RichText::new(format!("At {}", crate::model::short_time(self.at))).color(MUTED).size(11.0));
-                    // a new picture when the slider is let go, not on every step of a drag
+                    let end = (duration - 0.05).max(0.0);
+                    let r = ui.add(egui::Slider::new(&mut c.at, 0.0..=end).show_value(false)).on_hover_text("Which moment of the video becomes the cover");
+                    ui.label(RichText::new(format!("At {}", crate::model::short_time(c.at))).color(MUTED).size(11.0));
                     if r.drag_stopped() || (r.changed() && !r.dragged()) {
-                        self.stale = true;
-                        self.note = None;
+                        self.settled = Some(c.clone());
                     }
                 }
                 Kind::Image | Kind::WebCover => {
                     ui.horizontal(|ui| {
                         if theme::panel_button(ui, true, "Choose…", "Pick the picture for the cover").clicked() {
-                            if let Some(p) = rfd::FileDialog::new().add_filter("Pictures", &["png", "jpg", "jpeg", "webp", "bmp", "gif"]).pick_file() {
-                                self.picture = Some(p);
-                                self.stale = true;
-                                self.note = None;
+                            if let Some(f) = rfd::FileDialog::new().add_filter("Pictures", &["png", "jpg", "jpeg", "webp", "bmp", "gif"]).pick_file() {
+                                c.picture = Some(f);
+                                self.settled = Some(c.clone());
                             }
                         }
-                        let name = self.picture.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "No picture chosen".into());
+                        let name = c.picture.as_ref().and_then(|f| f.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "No picture chosen".into());
                         ui.label(RichText::new(name).color(MUTED).size(11.0));
                     });
                 }
             }
-        });
-        // the preview of the picture that would be added
-        let current = self.source();
-        let ready = current.is_some() && self.made.as_ref().map(|(s, _)| Some(s) == current.as_ref()).unwrap_or(false);
-        if let Some(tex) = &self.preview {
-            if current.is_some() {
+            let usable = Source::of(c).is_some();
+            if let (Some(tex), true) = (&self.picture.tex, usable) {
                 let sz = tex.size_vec2();
-                let scale = (240.0 / sz.x).min(135.0 / sz.y).min(1.0);
-                let tint = if ready { Color32::WHITE } else { Color32::from_gray(110) };
+                let scale = (ui.available_width() / sz.x).min(214.0 / sz.y).min(1.0);
+                let tint = if self.picture.busy() { Color32::from_gray(110) } else { Color32::WHITE };
                 ui.add(egui::Image::new(tex).fit_to_exact_size(sz * scale).corner_radius(4.0).tint(tint));
+            } else if usable && self.picture.busy() {
+                ui.spinner();
             }
-        }
-        ui.horizontal(|ui| {
-            if busy {
-                ui.spinner();
-                ui.label(RichText::new("Adding the cover…").color(MUTED));
-            } else if self.making.is_some() {
-                ui.spinner();
-            } else if ready {
-                if theme::primary_button(ui, "Add cover", "Save this picture inside the video as its cover").clicked() {
-                    if let Some((_, pic)) = &self.made {
-                        let (v, p) = (self.video.clone(), pic.clone());
-                        self.attaching = Some(task(move || attach(&v, &p)));
-                        self.note = None;
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.add_enabled_ui(usable, |ui| {
+                    if theme::primary_button(ui, "Save", "Use this as the video's cover").clicked() {
+                        result = Some(Some(c.clone()));
                     }
+                });
+                if had && theme::panel_button(ui, true, "Remove", "The video gets no cover").clicked() {
+                    result = Some(None);
                 }
-            }
+            });
         });
-        if let Some((ok, text)) = &self.note {
-            let col = if *ok { ACCENT } else { Color32::from_rgb(240, 120, 110) };
-            ui.label(RichText::new(text).color(col));
+        if !open || result.is_some() {
+            self.open = false;
         }
+        result
     }
 }
 
-impl Drop for Cover {
-    fn drop(&mut self) {
-        // a cover still being added keeps its picture until FFmpeg is done with it
-        if let (Some((_, p)), None) = (&self.made, &self.attaching) {
-            let _ = std::fs::remove_file(p);
+/// Draw the cover button at `r` (see `BUTTON`): the cover's picture, or a dashed box, with the
+/// edit sign; a little darker while hovered.
+pub fn paint_button(painter: &egui::Painter, r: egui::Rect, tex: Option<&TextureHandle>, hovered: bool) {
+    let radius = BUTTON_RADIUS as f32;
+    match tex {
+        Some(t) => {
+            // cropped to fill the square
+            let sz = t.size_vec2();
+            let (rw, rh) = if sz.x > sz.y { (sz.y / sz.x, 1.0) } else { (1.0, sz.x / sz.y.max(1.0)) };
+            let uv = egui::Rect::from_center_size(egui::pos2(0.5, 0.5), egui::vec2(rw, rh));
+            painter.add(egui::epaint::RectShape::filled(r, BUTTON_RADIUS, Color32::WHITE).with_texture(t.id(), uv));
+            painter.rect_filled(r, BUTTON_RADIUS, Color32::from_black_alpha(if hovered { 110 } else { 70 }));
+        }
+        None => {
+            painter.rect_filled(r, BUTTON_RADIUS, if hovered { theme::BG3 } else { BUTTON_FILL });
+            dashed_box(painter, r.shrink(0.5), radius, if hovered { Color32::from_white_alpha(90) } else { BUTTON_EDGE.gamma_multiply(2.5) });
         }
     }
+    edit_sign(painter, r.center(), EDIT_SIGN, Color32::WHITE);
+}
+
+/// A 1-px dashed edge (dashes 1 on, 3 off) around `r`, leaving the rounded corners open.
+fn dashed_box(painter: &egui::Painter, r: egui::Rect, radius: f32, col: Color32) {
+    let (on, off) = BUTTON_DASH;
+    let stroke = egui::Stroke::new(1.0_f32, col);
+    let sides = [
+        (egui::pos2(r.left() + radius, r.top()), egui::pos2(r.right() - radius, r.top())),
+        (egui::pos2(r.right(), r.top() + radius), egui::pos2(r.right(), r.bottom() - radius)),
+        (egui::pos2(r.right() - radius, r.bottom()), egui::pos2(r.left() + radius, r.bottom())),
+        (egui::pos2(r.left(), r.bottom() - radius), egui::pos2(r.left(), r.top() + radius)),
+    ];
+    for (s, e) in sides {
+        painter.extend(egui::Shape::dashed_line(&[s, e], stroke, on, off));
+    }
+}
+
+/// A pencil: the edit sign, drawn in `size` points.
+fn edit_sign(painter: &egui::Painter, c: egui::Pos2, size: f32, col: Color32) {
+    let h = size * 0.36;
+    let tip = egui::pos2(c.x - h, c.y + h);
+    let end = egui::pos2(c.x + h, c.y - h);
+    painter.line_segment([egui::pos2(tip.x + 2.0, tip.y - 2.0), end], egui::Stroke::new(2.4_f32, col));
+    painter.add(egui::Shape::convex_polygon(vec![tip, egui::pos2(tip.x + 3.6, tip.y - 1.0), egui::pos2(tip.x + 1.0, tip.y - 3.6)], col, egui::Stroke::NONE));
+    painter.line_segment([egui::pos2(c.x - h * 0.3, c.y + h * 1.25), egui::pos2(c.x + h * 1.1, c.y + h * 1.25)], egui::Stroke::new(1.2_f32, col.gamma_multiply(0.7)));
+}
+
+/// The remove button over a cover's top-right corner: a red disc with a white cross.
+pub fn remove_rect(button: egui::Rect) -> egui::Rect {
+    let (out_x, out_y) = REMOVE_OUT;
+    egui::Rect::from_min_size(egui::pos2(button.right() + out_x - REMOVE, button.top() - out_y), egui::vec2(REMOVE, REMOVE))
+}
+
+pub fn paint_remove(painter: &egui::Painter, r: egui::Rect, hovered: bool) {
+    painter.circle_filled(r.center(), REMOVE / 2.0, if hovered { REMOVE_COLOUR.gamma_multiply(1.3) } else { REMOVE_COLOUR });
+    let d = 2.5;
+    let s = egui::Stroke::new(1.3_f32, Color32::WHITE);
+    let c = r.center();
+    painter.line_segment([egui::pos2(c.x - d, c.y - d), egui::pos2(c.x + d, c.y + d)], s);
+    painter.line_segment([egui::pos2(c.x - d, c.y + d), egui::pos2(c.x + d, c.y - d)], s);
 }
 
 #[cfg(test)]
@@ -321,6 +409,9 @@ mod tests {
             assert_eq!(Kind::from_name(k.name()), k);
         }
         assert_eq!(DEFAULT_KIND, Kind::Frame);
+        // a picture cover without a picture gives nothing to export; a frame always does
+        assert_eq!(Source::of(&ProjectCover { kind: "image".into(), at: 0.0, picture: None }), None);
+        assert_eq!(Source::of(&ProjectCover { kind: "frame".into(), at: 2.0, picture: None }), Some(Source::Frame(2.0)));
     }
 
     #[test]
@@ -335,5 +426,41 @@ mod tests {
         assert!(m.contains("min(1920,iw)"));
         let p = make_args(Path::new("v.mp4"), &Source::Picture("p.png".into()), Path::new("c.jpg")).join(" ");
         assert!(p.contains("-i p.png") && !p.contains("-ss"), "{p}");
+    }
+
+    #[test]
+    fn a_cover_goes_into_a_real_video_and_replaces_the_last_one() {
+        let Some(ff) = ffmpeg() else { return };
+        let dir = std::env::temp_dir().join(format!("capcraft-cover-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let v = dir.join("v.mp4");
+        let made = quiet_command(ff)
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=320x180:rate=30", "-f", "lavfi", "-i", "sine=f=440", "-t", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac"])
+            .arg(&v)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !made {
+            return;
+        }
+        put_in(&v, &Source::Frame(1.0)).unwrap();
+        put_in(&v, &Source::Frame(0.5)).unwrap();
+        // the video, its sound and one cover: a second cover replaced the first
+        let probe = ff.with_file_name(if cfg!(windows) { "ffprobe.exe" } else { "ffprobe" });
+        if let Ok(o) = quiet_command(&probe).args(["-v", "error", "-show_entries", "stream=codec_name:stream_disposition=attached_pic", "-of", "csv=p=0"]).arg(&v).output() {
+            let out = String::from_utf8_lossy(&o.stdout).replace('\r', "");
+            let lines: Vec<&str> = out.lines().collect();
+            assert_eq!(lines, vec!["h264,0", "aac,0", "mjpeg,1"], "{out}");
+        }
+        assert!(!v.with_extension("cover-tmp.mp4").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_remove_button_sits_over_the_top_right_corner() {
+        let b = egui::Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(BUTTON, BUTTON));
+        let r = remove_rect(b);
+        assert_eq!((r.right(), r.top()), (b.right() + 4.0, b.top() - 6.0));
+        assert_eq!(r.width(), 12.0);
     }
 }
