@@ -2711,7 +2711,10 @@ impl App {
 
         self.export_window(ctx);
         if let Some(c) = self.cover_editor.window(ctx, &self.project, &self.images, self.revision) {
-            self.project.cover = c;
+            // as the original's setters (0x1801213c0, 0x180164790): the same value again changes nothing
+            if self.project.cover != c {
+                self.project.cover = c;
+            }
         }
         self.cover_thumb.poll(ctx, self.project.cover.as_ref(), &self.project, &self.images, self.revision, crate::cover::THUMB_SIDE, "cover-thumb");
         self.shortcuts_window(ctx);

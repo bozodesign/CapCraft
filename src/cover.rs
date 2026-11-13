@@ -57,6 +57,34 @@ pub const DEFAULT_AT: f64 = 0.0;
 pub const MAX_SIDE: u32 = 1920;
 /// JPEG quality of the saved cover (FFmpeg's scale: 2 is near the best, 31 the worst).
 pub const JPEG_QUALITY: u32 = 2;
+/// The original keeps the cover's moment as a whole number of microseconds (RetouchCover's
+/// int64 frame_timestamp, set by 0x180164790; it starts at 0), so a moment is snapped to one.
+pub const TICKS_PER_SECOND: f64 = 1_000_000.0;
+/// What the original makes of a cover picture (ImageTransToCover 0x1814ab040, TransToCover
+/// 0x1814ab830): a cover of kind 0 ("image") with sub-kind 1, holding a one-track draft whose
+/// clip shows the picture for 3 000 000 µs, from a photo 30 000 000 µs long.
+/// (Kept for the record: CapCraft puts the picture straight into the video, with no cover draft.)
+#[allow(dead_code)]
+pub const PICTURE_SUB_KIND: u32 = 1;
+#[allow(dead_code)]
+pub const PICTURE_CLIP_US: i64 = 3_000_000;
+#[allow(dead_code)]
+pub const PICTURE_MATERIAL_US: i64 = 30_000_000;
+
+/// A cover's moment as the original stores it: whole microseconds, never before the start.
+pub fn moment(at: f64) -> f64 {
+    (at.max(0.0) * TICKS_PER_SECOND).round() / TICKS_PER_SECOND
+}
+
+/// The cover kept after a save: its moment snapped (`moment`); a picture with an empty path is
+/// no picture, as the original makes no cover from one (ImageTransToCover 0x1814ab040).
+pub fn settle(mut c: ProjectCover) -> ProjectCover {
+    c.at = moment(c.at);
+    if c.picture.as_ref().is_some_and(|f| f.as_os_str().is_empty()) {
+        c.picture = None;
+    }
+    c
+}
 
 /// The cover button on the main track's header, as the original's (MainTrack QML `coverItem`):
 /// 38 x 38, 8 from the header's right edge, centred on the track, corners 4, a dashed 1-px edge
@@ -90,8 +118,8 @@ pub enum Source {
 impl Source {
     pub fn of(c: &ProjectCover) -> Option<Source> {
         match Kind::from_name(&c.kind) {
-            Kind::Image | Kind::WebCover => c.picture.clone().map(Source::Picture),
-            Kind::Frame => Some(Source::Frame(c.at)),
+            Kind::Image | Kind::WebCover => c.picture.clone().filter(|f| !f.as_os_str().is_empty()).map(Source::Picture),
+            Kind::Frame => Some(Source::Frame(moment(c.at))),
         }
     }
 }
@@ -318,7 +346,7 @@ impl Editor {
             ui.horizontal(|ui| {
                 ui.add_enabled_ui(usable, |ui| {
                     if theme::primary_button(ui, "Save", "Use this as the video's cover").clicked() {
-                        result = Some(Some(c.clone()));
+                        result = Some(Some(settle(c.clone())));
                     }
                 });
                 if had && theme::panel_button(ui, true, "Remove", "The video gets no cover").clicked() {
@@ -412,6 +440,17 @@ mod tests {
         // a picture cover without a picture gives nothing to export; a frame always does
         assert_eq!(Source::of(&ProjectCover { kind: "image".into(), at: 0.0, picture: None }), None);
         assert_eq!(Source::of(&ProjectCover { kind: "frame".into(), at: 2.0, picture: None }), Some(Source::Frame(2.0)));
+        // the original's kind numbers and its default (Cover() stores kind 1, a frame)
+        assert_eq!((Kind::Image as u32, Kind::Frame as u32, Kind::WebCover as u32), (0, 1, 2));
+        assert_eq!(PICTURE_SUB_KIND, 1);
+        assert_eq!(PICTURE_CLIP_US * 10, PICTURE_MATERIAL_US);
+        // moments are whole microseconds and never negative
+        assert_eq!(moment(1.234_567_89), 1.234_568);
+        assert_eq!(moment(-3.0), 0.0);
+        // an empty picture path is no picture
+        let s = settle(ProjectCover { kind: "image".into(), at: 0.000_000_4, picture: Some(std::path::PathBuf::new()) });
+        assert_eq!((s.at, s.picture.clone()), (0.0, None));
+        assert_eq!(Source::of(&ProjectCover { kind: "image".into(), at: 0.0, picture: Some(std::path::PathBuf::new()) }), None);
     }
 
     #[test]
