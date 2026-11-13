@@ -27,6 +27,11 @@ pub const PAGE_SIZE: usize = 60;
 /// Card width in the grid (points); as many columns as fit.
 pub const CARD_W: f32 = 196.0;
 pub const CARD_H: f32 = 112.0;
+/// Space between cards, across and down, and inside a card's edge.
+pub const CARD_GAP: f32 = 8.0;
+pub const CARD_PAD: f32 = 9.0;
+/// The language label's colour.
+const LANGUAGE_FILL: Color32 = Color32::from_rgb(60, 90, 120);
 /// The longest stretch of a person played with ▶ (seconds).
 pub const PERSON_SAMPLE_SECS: f64 = 8.0;
 
@@ -390,6 +395,28 @@ pub fn passes(v: &Voice, search: &str, gender: &str, age: &str, style: &str, lan
         && (language.is_empty() || languages_of(v).iter().any(|l| l == language))
 }
 
+/// How wide `chip` draws a label.
+fn chip_width(ui: &egui::Ui, s: &str) -> f32 {
+    ui.fonts(|f| f.layout_no_wrap(s.to_string(), egui::FontId::proportional(10.5), Color32::WHITE).size().x) + 10.0
+}
+
+/// ElevenLabs names voices "Roger - Laid-Back, Casual, Resonant": the name, and what it sounds like.
+pub fn split_name(name: &str) -> (&str, &str) {
+    for dash in [" - ", " – ", " — "] {
+        if let Some((a, b)) = name.split_once(dash) {
+            if !a.trim().is_empty() {
+                return (a.trim(), b.trim());
+            }
+        }
+    }
+    (name.trim(), "")
+}
+
+/// The order cards are shown in: voices made here first, then by name A–Z (any case).
+pub fn sort_voices(list: &mut [Voice]) {
+    list.sort_by(|a, b| b.designed.cmp(&a.designed).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+}
+
 fn chip(ui: &mut egui::Ui, s: &str, fill: Color32) {
     if s.is_empty() {
         return;
@@ -582,6 +609,8 @@ impl crate::app::App {
                 Tab::Favourites => store.voices.iter().filter(|v| v.favorite && passes(v, &l.search, g, a, s, lang)).cloned().collect(),
                 Tab::Shared => l.shared.clone(),
             };
+            let mut list = list;
+            sort_voices(&mut list);
             let filtering = !l.search.trim().is_empty() || l.gender + l.age + l.style + l.language > 0;
             let has_any = match l.tab {
                 Tab::Mine => store.voices.iter().any(|v| v.owner.is_empty()),
@@ -600,84 +629,131 @@ impl crate::app::App {
                 ui.label(RichText::new(empty).color(MUTED).size(11.5));
             }
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                let cols = ((ui.available_width() + 8.0) / (CARD_W + 8.0)).floor().max(1.0) as usize;
+                // a tidy grid: every card the same size, the columns sharing the width evenly
+                let avail = ui.available_width() - 4.0;
+                let cols = ((avail + CARD_GAP) / (CARD_W + CARD_GAP)).floor().max(1.0) as usize;
+                let w = ((avail - CARD_GAP * (cols as f32 - 1.0)) / cols as f32).floor();
                 for row in list.chunks(cols) {
-                    ui.horizontal(|ui| {
-                        for v in row {
-                            let fav = store.voices.iter().any(|o| o.id == v.id && o.favorite);
-                            let used: Vec<usize> = picks.iter().enumerate().filter(|(_, p)| **p == v.id).map(|(i, _)| i + 1).collect();
-                            let on = l.playing.as_deref() == Some(v.id.as_str());
-                            ui.allocate_ui(egui::vec2(CARD_W, CARD_H), |ui| {
-                                egui::Frame::new().fill(BG2).corner_radius(6.0).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
-                                  ui.vertical(|ui| {
-                                    ui.set_width(CARD_W - 16.0);
-                                    ui.set_height(CARD_H - 16.0);
-                                    ui.horizontal(|ui| {
-                                        let name = if v.designed { format!("✨ {}", v.name) } else { v.name.clone() };
-                                        let w = (ui.available_width() - 30.0).max(40.0);
-                                        ui.allocate_ui_with_layout(egui::vec2(w, 20.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                            ui.add(egui::Label::new(RichText::new(name).strong()).truncate()).on_hover_text(&v.description);
-                                        });
-                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            if theme::icon_button_on(ui, true, fav, if fav { "★" } else { "☆" }, if fav { "Remove from Favourites" } else { "Add to Favourites" }).clicked() {
-                                                act = Some(Act::Favourite(v.clone()));
-                                            }
-                                        });
-                                    });
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.spacing_mut().item_spacing.x = 4.0;
-                                        chip(ui, &pretty(&v.gender), gender_fill(&v.gender));
-                                        chip(ui, &pretty(&v.age), BG3);
-                                        chip(ui, &pretty(&v.accent), BG3);
-                                        let langs = languages_of(v);
-                                        if let Some(first) = langs.first() {
-                                            // the language picked in the filter is the one shown
-                                            let shown = if !lang.is_empty() && langs.iter().any(|x| x == lang) { lang.to_string() } else { first.clone() };
-                                            let more = if langs.len() > 1 { format!(" +{}", langs.len() - 1) } else { String::new() };
-                                            let r = ui.scope(|ui| chip(ui, &format!("{}{more}", language_name(&shown)), Color32::from_rgb(60, 90, 120))).response;
-                                            if langs.len() > 1 {
-                                                r.on_hover_text(langs.iter().map(|x| language_name(x)).collect::<Vec<_>>().join(", "));
-                                            }
-                                        }
-                                    });
-                                    let style = if v.style.is_empty() { v.description.clone() } else { pretty(&v.style) };
-                                    let style = if style.is_empty() && v.gender.is_empty() && v.age.is_empty() { "No details yet: load your voices (⬇) again".to_string() } else { style };
-                                    ui.add(egui::Label::new(RichText::new(style).color(MUTED).size(11.0)).truncate());
-                                    ui.add_space((ui.available_height() - 26.0).max(0.0));
-                                    ui.horizontal(|ui| {
-                                        let can_hear = !v.preview_url.is_empty() || sample_path(&v.id).is_file();
-                                        let tip = if on { "Stop" } else if can_hear { "Hear a sample (free)" } else { "This voice has no sample" };
-                                        if theme::icon_button_on(ui, can_hear, on, if on { "■" } else { "▶" }, tip).clicked() {
-                                            act = Some(if on { Act::Stop } else { Act::Play(v.clone()) });
-                                        }
-                                        if !used.is_empty() {
-                                            ui.label(RichText::new(format!("Person {}", used.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", "))).color(theme::ACCENT).size(10.5));
-                                        }
-                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match l.for_person {
-                                            Some(p) => {
-                                                if theme::panel_button(ui, true, "Use", &format!("Use this voice for Person {}", p + 1)).clicked() {
-                                                    act = Some(Act::Use(v.clone(), p));
-                                                }
-                                            }
-                                            None if people > 0 => {
-                                                ui.menu_button(RichText::new("Use for…").size(theme::BUTTON_TEXT_SIZE), |ui| {
-                                                    for p in 0..people {
-                                                        if ui.button(format!("Person {}", p + 1)).clicked() {
-                                                            act = Some(Act::Use(v.clone(), p));
-                                                            ui.close_menu();
-                                                        }
-                                                    }
-                                                });
-                                            }
-                                            None => {}
-                                        });
-                                    });
-                                  });
-                                });
+                    let (row_rect, _) = ui.allocate_exact_size(egui::vec2(avail, CARD_H), egui::Sense::hover());
+                    for (c, v) in row.iter().enumerate() {
+                        let cell = egui::Rect::from_min_size(row_rect.min + egui::vec2(c as f32 * (w + CARD_GAP), 0.0), egui::vec2(w, CARD_H));
+                        let fav = store.voices.iter().any(|o| o.id == v.id && o.favorite);
+                        let used: Vec<usize> = picks.iter().enumerate().filter(|(_, p)| **p == v.id).map(|(i, _)| i + 1).collect();
+                        let on = l.playing.as_deref() == Some(v.id.as_str());
+                        let hovered = ui.rect_contains_pointer(cell);
+                        let stroke = if on || !used.is_empty() {
+                            egui::Stroke::new(1.0_f32, theme::ACCENT)
+                        } else if hovered {
+                            egui::Stroke::new(1.0_f32, Color32::from_gray(80))
+                        } else {
+                            egui::Stroke::NONE
+                        };
+                        ui.painter().rect(cell, 6.0, if hovered { Color32::from_gray(44) } else { BG2 }, stroke, egui::StrokeKind::Inside);
+                        let inner = cell.shrink(CARD_PAD);
+                        let mut cu = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Min)));
+                        cu.set_clip_rect(cell.intersect(ui.clip_rect()));
+                        let ui = &mut cu;
+                        let (title, tagline) = split_name(&v.name);
+                        // name and favourite
+                        ui.allocate_ui_with_layout(egui::vec2(inner.width(), 20.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            let title = if v.designed { format!("✨ {title}") } else { title.to_string() };
+                            let nw = (ui.available_width() - 26.0).max(40.0);
+                            ui.allocate_ui_with_layout(egui::vec2(nw, 20.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                ui.add(egui::Label::new(RichText::new(title).strong().size(13.0)).truncate()).on_hover_text(&v.name);
                             });
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if theme::icon_button_on(ui, true, fav, if fav { "★" } else { "☆" }, if fav { "Remove from Favourites" } else { "Add to Favourites" }).clicked() {
+                                    act = Some(Act::Favourite(v.clone()));
+                                }
+                            });
+                        });
+                        // what it says about itself: the part of the name after " - ", else its style or description
+                        let about = if !tagline.is_empty() {
+                            tagline.to_string()
+                        } else if !v.style.is_empty() {
+                            pretty(&v.style)
+                        } else {
+                            v.description.clone()
+                        };
+                        let about = if about.is_empty() && v.gender.is_empty() && v.age.is_empty() { "No details yet: load your voices (⬇) again".to_string() } else { about };
+                        ui.allocate_ui_with_layout(egui::vec2(inner.width(), 16.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            let r = ui.add(egui::Label::new(RichText::new(&about).color(MUTED).size(11.0)).truncate());
+                            if !v.description.is_empty() {
+                                r.on_hover_text(&v.description);
+                            }
+                        });
+                        ui.add_space(4.0);
+                        // labels on one line: as many as fit, the rest on hover
+                        let langs = languages_of(v);
+                        let mut chips: Vec<(String, Color32)> = Vec::new();
+                        for (t, f) in [(pretty(&v.gender), gender_fill(&v.gender)), (pretty(&v.age), BG3), (pretty(&v.accent), BG3)] {
+                            if !t.is_empty() {
+                                chips.push((t, f));
+                            }
                         }
-                    });
-                    ui.add_space(4.0);
+                        if let Some(first) = langs.first() {
+                            // the language picked in the filter is the one shown
+                            let shown = if !lang.is_empty() && langs.iter().any(|x| x == lang) { lang.to_string() } else { first.clone() };
+                            let more = if langs.len() > 1 { format!(" +{}", langs.len() - 1) } else { String::new() };
+                            chips.push((format!("{}{more}", language_name(&shown)), LANGUAGE_FILL));
+                        }
+                        let r = ui.allocate_ui_with_layout(egui::vec2(inner.width(), 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            let mut left = ui.available_width();
+                            let mut hidden: Vec<String> = Vec::new();
+                            for (t, f) in &chips {
+                                let need = chip_width(ui, t) + 4.0;
+                                if need <= left && hidden.is_empty() {
+                                    chip(ui, t, *f);
+                                    left -= need;
+                                } else {
+                                    hidden.push(t.clone());
+                                }
+                            }
+                            hidden
+                        });
+                        let mut tip: Vec<String> = Vec::new();
+                        if !r.inner.is_empty() {
+                            tip.push(r.inner.join(" · "));
+                        }
+                        if langs.len() > 1 {
+                            tip.push(langs.iter().map(|x| language_name(x)).collect::<Vec<_>>().join(", "));
+                        }
+                        if !tip.is_empty() {
+                            r.response.on_hover_text(tip.join("\n"));
+                        }
+                        // the actions, always on the card's bottom line
+                        let bottom = egui::Rect::from_min_max(egui::pos2(inner.left(), inner.bottom() - 24.0), inner.max);
+                        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(bottom).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
+                            let can_hear = !v.preview_url.is_empty() || sample_path(&v.id).is_file();
+                            let tip = if on { "Stop" } else if can_hear { "Hear a sample (free)" } else { "This voice has no sample" };
+                            if theme::icon_button_on(ui, can_hear, on, if on { "■" } else { "▶" }, tip).clicked() {
+                                act = Some(if on { Act::Stop } else { Act::Play(v.clone()) });
+                            }
+                            if !used.is_empty() {
+                                ui.label(RichText::new(format!("Person {}", used.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", "))).color(theme::ACCENT).size(10.5));
+                            }
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match l.for_person {
+                                Some(p) => {
+                                    if theme::panel_button(ui, true, "Use", &format!("Use this voice for Person {}", p + 1)).clicked() {
+                                        act = Some(Act::Use(v.clone(), p));
+                                    }
+                                }
+                                None if people > 0 => {
+                                    ui.menu_button(RichText::new("Use for…").size(theme::BUTTON_TEXT_SIZE), |ui| {
+                                        for p in 0..people {
+                                            if ui.button(format!("Person {}", p + 1)).clicked() {
+                                                act = Some(Act::Use(v.clone(), p));
+                                                ui.close_menu();
+                                            }
+                                        }
+                                    });
+                                }
+                                None => {}
+                            });
+                        });
+                    }
+                    ui.add_space(CARD_GAP - ui.spacing().item_spacing.y);
                 }
             });
         });
@@ -766,6 +842,17 @@ mod tests {
         assert!(!passes(&shared[0], "", "", "", "", "en"), "no language known: not shown under a language");
         assert_eq!((LANGUAGES[1].0, LANGUAGES[2].0), ("en", "th"));
         assert_eq!(language_name("th"), "Thai");
+        // tidy cards: name and what it sounds like apart, voices in name order
+        assert_eq!(split_name("Roger - Laid-Back, Casual"), ("Roger", "Laid-Back, Casual"));
+        assert_eq!(split_name("Will"), ("Will", ""));
+        assert_eq!(split_name("Alana – British, Podcasts"), ("Alana", "British, Podcasts"));
+        let mut list = vec![
+            Voice { name: "sarah".into(), ..Default::default() },
+            Voice { name: "Alice".into(), ..Default::default() },
+            Voice { name: "Zed".into(), designed: true, ..Default::default() },
+        ];
+        sort_voices(&mut list);
+        assert_eq!(list.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(), vec!["Zed", "Alice", "sarah"]);
         let rest: Vec<&str> = LANGUAGES[COMMON_LANGUAGES..].iter().map(|(_, n)| *n).collect();
         let mut sorted = rest.clone();
         sorted.sort();
