@@ -156,8 +156,14 @@ pub struct Voice {
     pub accent: String,
     #[serde(default)]
     pub style: String,
+    /// The voice's own language, as the original keeps a voice's `original_language`
+    /// (videoeditor.dll TtsLanguageInfo, from_json 0x180e01bb0).
     #[serde(default)]
     pub language: String,
+    /// Every language it speaks, comma-separated: the original's `language_all` list, kept apart
+    /// from its own language.
+    #[serde(default)]
+    pub languages: String,
     /// ElevenLabs' public sample recording (free to hear).
     #[serde(default)]
     pub preview_url: String,
@@ -210,7 +216,10 @@ impl Store {
                     age: keep(&v.age, &o.age),
                     accent: keep(&v.accent, &o.accent),
                     style: keep(&v.style, &o.style),
+                    // the original patches its own language and the list each on its own
+                    // (TtsLanguageInfo::patch_from_json 0x180bb70f0): only what the new copy has
                     language: keep(&v.language, &o.language),
+                    languages: keep(&v.languages, &o.languages),
                     preview_url: keep(&v.preview_url, &o.preview_url),
                     designed: o.designed || v.designed,
                     favorite: o.favorite || v.favorite,
@@ -1119,7 +1128,8 @@ fn call_tool(name: &str, args: &serde_json::Value, key: &str) -> Result<String, 
             }
             let mut out = String::from("Voices:\n");
             for v in &st.voices {
-                let tags: Vec<&str> = [v.gender.as_str(), v.age.as_str(), v.accent.as_str(), v.style.as_str(), v.language.as_str()].into_iter().filter(|t| !t.is_empty()).collect();
+                let langs = crate::voicelib::languages_of(v).join(",");
+                let tags: Vec<&str> = [v.gender.as_str(), v.age.as_str(), v.accent.as_str(), v.style.as_str(), langs.as_str()].into_iter().filter(|t| !t.is_empty()).collect();
                 out += &format!(
                     "- {} (id {}){}{}{}{}\n",
                     v.name,

@@ -90,9 +90,22 @@ pub fn language_name(code: &str) -> String {
     LANGUAGES.iter().skip(1).find(|(k, _)| *k == c).map(|(_, n)| n.to_string()).unwrap_or_else(|| c.to_uppercase())
 }
 
-/// The language codes a voice speaks (kept comma-separated in `Voice::language`).
+/// A language code without its region, lower case ("en-US" → "en").
+pub fn language_code(l: &str) -> String {
+    l.trim().to_lowercase().split(['-', '_']).next().unwrap_or("").to_string()
+}
+
+/// The language codes a voice speaks: its own language first, then the rest of its list, each
+/// once (the original's TtsLanguageInfo: `original_language`, then `language_all`).
 pub fn languages_of(v: &Voice) -> Vec<String> {
-    v.language.split(',').map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect()
+    let mut out: Vec<String> = Vec::new();
+    for l in v.language.split(',').chain(v.languages.split(',')) {
+        let l = language_code(l);
+        if !l.is_empty() && !out.contains(&l) {
+            out.push(l);
+        }
+    }
+    out
 }
 
 /// A word from ElevenLabs' labels made readable: "middle_aged" → "Middle-aged",
@@ -131,18 +144,14 @@ pub fn read_voice(x: &serde_json::Value) -> Option<Voice> {
             u
         }
     };
-    // its language, then every language ElevenLabs checked it speaks
+    // its own language, and apart from it every language ElevenLabs checked it speaks
+    let own = language_code(&pick("language"));
     let mut langs: Vec<String> = Vec::new();
-    let mut add = |l: &str| {
-        let l = l.trim().to_lowercase();
-        let l = l.split(['-', '_']).next().unwrap_or("").to_string();
+    for l in x.get("verified_languages").and_then(|l| l.as_array()).into_iter().flatten() {
+        let l = language_code(&text(l, "language"));
         if !l.is_empty() && !langs.contains(&l) {
             langs.push(l);
         }
-    };
-    add(&pick("language"));
-    for l in x.get("verified_languages").and_then(|l| l.as_array()).into_iter().flatten() {
-        add(&text(l, "language"));
     }
     let mut description = text(x, "description");
     if description.is_empty() {
@@ -160,7 +169,8 @@ pub fn read_voice(x: &serde_json::Value) -> Option<Voice> {
         age: pick("age"),
         accent: pick("accent"),
         style,
-        language: langs.join(","),
+        language: own,
+        languages: langs.join(","),
         preview_url: text(x, "preview_url"),
         owner: text(x, "public_owner_id"),
         favorite: false,
@@ -372,7 +382,7 @@ pub struct Library {
 /// library is filtered by ElevenLabs.)
 pub fn passes(v: &Voice, search: &str, gender: &str, age: &str, style: &str, language: &str) -> bool {
     let q = search.trim().to_lowercase();
-    let hay = format!("{} {} {} {} {}", v.name, v.description, v.accent, v.style, v.language).to_lowercase();
+    let hay = format!("{} {} {} {} {}", v.name, v.description, v.accent, v.style, languages_of(v).join(" ")).to_lowercase();
     (q.is_empty() || q.split_whitespace().all(|w| hay.contains(w)))
         && (gender.is_empty() || v.gender.eq_ignore_ascii_case(gender))
         && (age.is_empty() || v.age.eq_ignore_ascii_case(age))
@@ -743,7 +753,14 @@ mod tests {
         // languages: its own, then the ones ElevenLabs checked; English first and Thai second
         let th: serde_json::Value = serde_json::from_str(r#"{"voice_id":"t1","name":"Nok","language":"th","verified_languages":[{"language":"th"},{"language":"en-US"}]}"#).unwrap();
         let t = read_voice(&th).unwrap();
-        assert_eq!(t.language, "th,en");
+        assert_eq!((t.language.as_str(), t.languages.as_str()), ("th", "th,en"));
+        assert_eq!(languages_of(&t), vec!["th", "en"]);
+        // its own language comes first even when the checked list starts elsewhere
+        let mixed = Voice { language: "ja".into(), languages: "en,ja".into(), ..Default::default() };
+        assert_eq!(languages_of(&mixed), vec!["ja", "en"]);
+        // voices saved before the split kept everything in one field
+        let old = Voice { language: "th,en".into(), ..Default::default() };
+        assert_eq!(languages_of(&old), vec!["th", "en"]);
         assert!(passes(&t, "", "", "", "", "en") && passes(&t, "", "", "", "", "th"));
         assert!(!passes(&t, "", "", "", "", "ja"));
         assert!(!passes(&shared[0], "", "", "", "", "en"), "no language known: not shown under a language");
