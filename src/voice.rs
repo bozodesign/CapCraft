@@ -54,6 +54,26 @@ pub const CLONE_MIN_SECS: f64 = 10.0;
 /// The two enhance choices, kept in a person's pick instead of a voice id.
 pub const PICK_CLEAN: &str = "@clean";
 pub const PICK_REMAKE: &str = "@remake";
+/// The original's enhance voice (vocal beautify) refuses sound longer than
+/// `jianyingpro_vocal_beautify_config.duration` minutes, default 15, compared in microseconds as
+/// minutes × 60 000 000 (videoeditor.dll FUN_181c5fb00).
+pub const ENHANCE_MAX_MINUTES: i64 = 15;
+pub const MICROS_PER_MINUTE: i64 = 60_000_000;
+/// How much of the background stays under an enhanced voice: the original's
+/// MaterialVocalBeautify `ambient_sound_level`, an int that "must be in [0, 100]", default 0
+/// (videoeditor.dll schema at 0x18334c620, check in FUN_182240de0).
+pub const AMBIENT_MAX: i32 = 100;
+pub const AMBIENT_DEFAULT: i32 = 0;
+
+/// Too long for the original to enhance (the clip's length in seconds).
+pub fn enhance_too_long(secs: f64) -> bool {
+    (secs * 1_000_000.0).round() as i64 > ENHANCE_MAX_MINUTES * MICROS_PER_MINUTE
+}
+
+/// The original clip's volume under enhanced voices: the background level as a share.
+pub fn ambient_volume(level: i32) -> f32 {
+    level.clamp(0, AMBIENT_MAX) as f32 / AMBIENT_MAX as f32
+}
 
 /// What happens to one person.
 #[derive(Clone, Debug, PartialEq)]
@@ -548,6 +568,9 @@ pub fn find_speakers(ffmpeg: PathBuf, src: Source, base: PathBuf, key: String, l
 /// Send each person's parts as their pick says; `picks[i]` is for person i.
 pub fn change(ffmpeg: PathBuf, found: Found, mut picks: Vec<Pick>, key: String, clean: bool, clip_name: String) -> Arc<Mutex<Job>> {
     spawn("Changing voices…", move |st| {
+        if picks.iter().any(|p| matches!(p, Pick::Clean | Pick::Remake)) && enhance_too_long(found.source.duration) {
+            return Err(format!("Enhancing a voice works on clips up to {ENHANCE_MAX_MINUTES} minutes; cut the clip shorter first"));
+        }
         // re-made voices: clone each such person from their own speech first
         for (i, p) in picks.iter_mut().enumerate() {
             if *p != Pick::Remake {
@@ -684,6 +707,8 @@ pub struct Panel {
     pub describe: String,
     pub name: String,
     pub mute_original: bool,
+    /// Background kept under enhanced voices, 0–100.
+    pub ambient: i32,
     pub clean: bool,
     pub note: String,
     /// The voice library window (voicelib.rs).
@@ -692,7 +717,7 @@ pub struct Panel {
 
 impl Default for Panel {
     fn default() -> Self {
-        Panel { open: false, job: None, found: None, picks: vec![], store: Store::load(), seen: None, checked: std::time::Instant::now(), describe: String::new(), name: String::new(), mute_original: true, clean: true, note: String::new(), library: Default::default() }
+        Panel { open: false, job: None, found: None, picks: vec![], store: Store::load(), seen: None, checked: std::time::Instant::now(), describe: String::new(), name: String::new(), mute_original: true, ambient: AMBIENT_DEFAULT, clean: true, note: String::new(), library: Default::default() }
     }
 }
 
@@ -860,6 +885,13 @@ impl crate::app::App {
                     ui.label(RichText::new(format!("“{}…”", s.sample)).color(MUTED).size(11.0));
                 }
                 ui.checkbox(&mut v.mute_original, "Mute the original voice");
+                if v.mute_original && v.picks.iter().any(|p| p == PICK_CLEAN || p == PICK_REMAKE) {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Background").size(12.0));
+                        ui.add(egui::Slider::new(&mut v.ambient, 0..=AMBIENT_MAX).suffix("%"));
+                        theme::hint(ui, "How much of the clip's own sound stays under the enhanced voices (0 keeps only the voice). Enhancing works on clips up to 15 minutes.");
+                    });
+                }
                 ui.checkbox(&mut v.clean, "Remove background noise");
                 let any = v.picks.iter().any(|p| !p.is_empty());
                 ui.add_enabled_ui(any && !v.busy(), |ui| {
@@ -1003,9 +1035,11 @@ impl crate::app::App {
             return;
         }
         if self.voice.mute_original {
+            let enhanced = self.voice.picks.iter().any(|p| p == PICK_CLEAN || p == PICK_REMAKE);
+            let keep = if enhanced { ambient_volume(self.voice.ambient) } else { 0.0 };
             if let Some(f) = &self.voice.found {
                 if let Some(c) = self.project.clip_mut(f.source.clip) {
-                    c.volume = 0.0;
+                    c.volume = keep;
                 }
             }
         }
@@ -1249,6 +1283,12 @@ mod tests {
         assert_eq!(Pick::from_id("", &st), Pick::Keep);
         assert!(matches!(Pick::from_id("v1", &st), Pick::Voice(_)));
         assert_eq!(Pick::from_id("gone", &st), Pick::Keep);
+        // the original's limits: 15 minutes, background 0–100
+        assert!(!enhance_too_long(15.0 * 60.0));
+        assert!(enhance_too_long(15.0 * 60.0 + 0.001));
+        assert_eq!(ambient_volume(0), 0.0);
+        assert_eq!(ambient_volume(25), 0.25);
+        assert_eq!(ambient_volume(250), 1.0);
     }
 
     #[test]
