@@ -1759,6 +1759,7 @@ impl App {
                 let w = &mut ui.visuals_mut().widgets;
                 w.inactive.weak_bg_fill = Color32::TRANSPARENT;
                 w.inactive.bg_stroke = Stroke::NONE;
+                w.hovered.weak_bg_fill = theme::ICON_HOVER;
                 if theme::icon_button(ui, "🏠", "Projects: save and go back to your projects").clicked() {
                     self.go_home();
                 }

@@ -2,13 +2,32 @@
 
 use egui::{Color32, CornerRadius, Stroke, Visuals};
 
-pub const BG0: Color32 = Color32::from_rgb(14, 14, 16);
-pub const BG1: Color32 = Color32::from_rgb(24, 24, 27);
-pub const BG2: Color32 = Color32::from_rgb(34, 34, 38);
-pub const BG3: Color32 = Color32::from_rgb(46, 46, 52);
-pub const LINE: Color32 = Color32::from_rgb(52, 52, 58);
-pub const TEXT: Color32 = Color32::from_rgb(230, 230, 234);
-pub const MUTED: Color32 = Color32::from_rgb(140, 140, 150);
+// The original's dark palette: FusionUI.dll `LVColor`, looked up by `modeColor` 0x180036470 in
+// its new colour table (0x18022ec50, on by default: 0x18022ec40 = 1), else in the dark table
+// (`color_mode` 0, 0x18022f480). Accent and clip colours stay CapCraft's own.
+/// Fill_Background_Level1 #141414
+pub const BG0: Color32 = Color32::from_rgb(0x14, 0x14, 0x14);
+/// Fill_Background_Level2 #1C1C1C
+pub const BG1: Color32 = Color32::from_rgb(0x1C, 0x1C, 0x1C);
+/// Fill_Background_Level3 #262626
+pub const BG2: Color32 = Color32::from_rgb(0x26, 0x26, 0x26);
+/// Fill_Button_Level2 #3B3B3B (0x18001cdf0), also Hover_Btn_Level2 in the new table
+pub const BG3: Color32 = Color32::from_rgb(0x3B, 0x3B, 0x3B);
+/// Fill_Button_Level3 #4F4F4F (0x18001cea0): a button under the pointer
+pub const BTN_HOVER: Color32 = Color32::from_rgb(0x4F, 0x4F, 0x4F);
+/// Fill_Button_Level4 #636363 (0x18001cf50): a button being pressed
+pub const BTN_PRESSED: Color32 = Color32::from_rgb(0x63, 0x63, 0x63);
+/// Fill_TransParency_Hover #505057 (0x18001d0b0, dark table): an icon without a box, under the pointer
+pub const ICON_HOVER: Color32 = Color32::from_rgb(0x50, 0x50, 0x57);
+/// White0A_Line_Level2 #14FFFFFF: white at 0x14 alpha (premultiplied)
+pub const LINE: Color32 = Color32::from_rgba_premultiplied(0x14, 0x14, 0x14, 0x14);
+/// Text_Primary #E0E0E0
+pub const TEXT: Color32 = Color32::from_rgb(0xE0, 0xE0, 0xE0);
+/// Text_Tertiary #949494
+pub const MUTED: Color32 = Color32::from_rgb(0x94, 0x94, 0x94);
+/// Button labels: LVFont ButtonRegular11 = SubheadlineRegular, 11 px, weight 400
+/// (initFontCC_V2 0x180038610, setPixelSize in 0x180037470).
+pub const BUTTON_TEXT_SIZE: f32 = 11.0;
 pub const ACCENT: Color32 = Color32::from_rgb(239, 45, 72);
 pub const ACCENT_DIM: Color32 = Color32::from_rgb(122, 28, 42);
 pub const CLIP_VIDEO: Color32 = Color32::from_rgb(28, 84, 96);
@@ -179,16 +198,17 @@ pub fn apply(ctx: &egui::Context) {
     v.widgets.noninteractive.bg_fill = BG1;
     v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, LINE);
     v.widgets.inactive.bg_fill = BG2;
-    v.widgets.inactive.weak_bg_fill = BG2;
+    v.widgets.inactive.weak_bg_fill = BG3;
     v.widgets.inactive.corner_radius = CornerRadius::same(5);
     v.widgets.hovered.bg_fill = BG3;
-    v.widgets.hovered.weak_bg_fill = BG3;
+    v.widgets.hovered.weak_bg_fill = BTN_HOVER;
     v.widgets.hovered.corner_radius = CornerRadius::same(5);
     v.widgets.active.bg_fill = ACCENT_DIM;
-    v.widgets.active.weak_bg_fill = ACCENT_DIM;
+    v.widgets.active.weak_bg_fill = BTN_PRESSED;
     v.widgets.active.corner_radius = CornerRadius::same(5);
     v.slider_trailing_fill = true;
     v.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, TEXT);
+    v.widgets.inactive.bg_stroke = Stroke::NONE;
     v.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, TEXT);
     v.widgets.hovered.fg_stroke = Stroke::new(1.5_f32, Color32::WHITE);
     v.widgets.active.fg_stroke = Stroke::new(1.5_f32, Color32::WHITE);
@@ -204,8 +224,8 @@ pub fn apply(ctx: &egui::Context) {
     });
 }
 
-/// Text and icons of a button that can't be used now.
-pub const DISABLED: Color32 = Color32::from_rgb(88, 88, 96);
+/// Text and icons of a button that can't be used now: Text_Disabled #525252.
+pub const DISABLED: Color32 = Color32::from_rgb(0x52, 0x52, 0x52);
 
 /// A small icon button for an everyday action: only the icon, a soft square behind it while the
 /// pointer is over it, and its full name on hover.
@@ -225,7 +245,7 @@ pub fn icon_button_on(ui: &mut egui::Ui, enabled: bool, on: bool, icon: &str, ti
         if on {
             p.rect_filled(rect, 4.0, ACCENT_DIM);
         } else if hot {
-            p.rect_filled(rect, 4.0, BG3);
+            p.rect_filled(rect, 4.0, ICON_HOVER);
         }
         let col = if !enabled { DISABLED } else if hot || on { Color32::WHITE } else { TEXT };
         p.text(rect.center(), egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(15.0), col);
@@ -235,13 +255,13 @@ pub fn icon_button_on(ui: &mut egui::Ui, enabled: bool, on: bool, icon: &str, ti
 
 /// A panel's own action: a compact button with an icon and a word or two (never a wide bar).
 pub fn panel_button(ui: &mut egui::Ui, enabled: bool, label: &str, tip: &str) -> egui::Response {
-    let b = egui::Button::new(egui::RichText::new(label).size(13.0)).corner_radius(4.0).min_size(egui::vec2(0.0, 26.0));
+    let b = egui::Button::new(egui::RichText::new(label).size(BUTTON_TEXT_SIZE)).corner_radius(4.0).min_size(egui::vec2(0.0, 26.0));
     ui.add_enabled(enabled, b).on_hover_text(tip).on_disabled_hover_text(tip)
 }
 
 /// The one main action of the window (Export): compact, in the accent colour.
 pub fn primary_button(ui: &mut egui::Ui, label: &str, tip: &str) -> egui::Response {
-    let b = egui::Button::new(egui::RichText::new(label).color(Color32::WHITE).size(13.0)).fill(ACCENT).corner_radius(4.0).min_size(egui::vec2(0.0, 26.0));
+    let b = egui::Button::new(egui::RichText::new(label).color(Color32::WHITE).size(BUTTON_TEXT_SIZE)).fill(ACCENT).corner_radius(4.0).min_size(egui::vec2(0.0, 26.0));
     ui.add(b).on_hover_text(tip)
 }
 
