@@ -54,6 +54,8 @@ pub struct Options {
     pub music: bool,
     /// Longest caption the engine makes, in bytes of text (Thai letters take 3).
     pub max_len: u32,
+    /// Send the sound to ElevenLabs with this API key instead of listening on this computer.
+    pub cloud_key: Option<String>,
 }
 
 #[derive(Default)]
@@ -191,11 +193,16 @@ pub fn start(p: Project, pcm: HashMap<u64, Arc<Vec<i16>>>, o: Options) -> Arc<Mu
 }
 
 fn run(mut p: Project, pcm: &HashMap<u64, Arc<Vec<i16>>>, o: &Options, st: &Arc<Mutex<State>>) -> Result<Vec<Sentence>, String> {
-    let exe = engine().ok_or("The speech engine isn't installed (whisper folder missing)")?;
     let ffmpeg = crate::media::ffmpeg().ok_or("ffmpeg wasn't found")?;
-    if !o.model.is_file() {
-        return Err("The speech model file wasn't found".into());
-    }
+    let exe = match &o.cloud_key {
+        Some(_) => None,
+        None => {
+            if !o.model.is_file() {
+                return Err("The speech model file wasn't found".into());
+            }
+            Some(engine().ok_or("The speech engine isn't installed (whisper folder missing)")?)
+        }
+    };
     if !o.music {
         for t in p.tracks.iter_mut().filter(|t| t.kind == crate::model::TrackKind::Audio) {
             t.muted = true;
@@ -223,6 +230,15 @@ fn run(mut p: Project, pcm: &HashMap<u64, Arc<Vec<i16>>>, o: &Options, st: &Arc<
     if !ok {
         return Err("Couldn't prepare the sound for the speech engine".into());
     }
+    let Some(exe) = exe else {
+        // online: ElevenLabs hears it
+        let key = o.cloud_key.as_deref().unwrap_or("");
+        let r = crate::eleven::transcribe(ffmpeg, &wav, &dir, key, &o.language, o.max_len as usize, st);
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut s = r?;
+        start_at_first_word(&mut s);
+        return Ok(s);
+    };
     {
         let mut g = st.lock().unwrap_or_else(|e| e.into_inner());
         g.stage = if o.gpu { "Listening (graphics card)…".into() } else { "Listening (processor)…".into() };
@@ -259,6 +275,10 @@ fn run(mut p: Project, pcm: &HashMap<u64, Arc<Vec<i16>>>, o: &Options, st: &Arc<
     let mut cmd = base(&model);
     cmd.arg("-of").arg(&out);
     cmd.args(["-l", &lang, "-ojf", "-ml", &o.max_len.to_string(), "-sow", "-sns", "-pp", "-np"]);
+    // DTW times say when each piece was really heard (the engine needs flash attention off)
+    if let Some(d) = dtw_preset(&model) {
+        cmd.args(["-dtw", d, "-nfa"]);
+    }
     let mut child = cmd.stdout(Stdio::null()).stderr(Stdio::piped()).spawn().map_err(|e| format!("Couldn't start the speech engine: {e}"))?;
     let err = child.stderr.take().unwrap();
     let st3 = st.clone();
@@ -353,6 +373,41 @@ fn raw(s: &str) -> Vec<u8> {
     v
 }
 
+/// The engine writes DTW times in hundredths of a second.
+pub const DTW_UNIT_MS: i64 = 10;
+/// A piece starts at most this long before its DTW time (CapCraft's own, measured: in a test
+/// with background noise the engine put "Welcome" at 0:00, its DTW time was 3.40 s and the
+/// talking started at 3.12 s).
+pub const DTW_LEAD_MS: i64 = 300;
+
+/// The DTW setting (`-dtw`) for a model, from its file name: the engine needs to know the model's
+/// size to line its attention up with the sound. Unknown models get none.
+pub fn dtw_preset(model: &Path) -> Option<&'static str> {
+    let n = model.file_name()?.to_string_lossy().to_lowercase().replace(['-', '_'], ".");
+    let en = n.contains(".en");
+    Some(if n.contains("turbo") {
+        "large.v3.turbo"
+    } else if n.contains("large") || n.contains("thonburian") {
+        if n.contains("v1") {
+            "large.v1"
+        } else if n.contains("v2") {
+            "large.v2"
+        } else {
+            "large.v3"
+        }
+    } else if n.contains("medium") {
+        if en { "medium.en" } else { "medium" }
+    } else if n.contains("small") {
+        if en { "small.en" } else { "small" }
+    } else if n.contains("base") {
+        if en { "base.en" } else { "base" }
+    } else if n.contains("tiny") {
+        if en { "tiny.en" } else { "tiny" }
+    } else {
+        return None;
+    })
+}
+
 fn ms(v: &serde_json::Value, k: &str) -> i64 {
     v.get("offsets").and_then(|o| o.get(k)).and_then(|x| x.as_i64()).unwrap_or(0)
 }
@@ -383,7 +438,14 @@ pub fn parse(bytes: &[u8]) -> Vec<Sentence> {
             if t.starts_with(b"[_") || t.starts_with(b"<|") || t.is_empty() {
                 continue;
             }
-            let (a, b) = (ms(tok, "from"), ms(tok, "to").max(ms(tok, "from")));
+            let (mut a, mut b) = (ms(tok, "from"), ms(tok, "to").max(ms(tok, "from")));
+            // the engine's own start is often far too early (the first sentence at 0:00 though
+            // the talking starts later); its DTW time, when asked for, says when the piece was
+            // really heard, so the piece can't start more than DTW_LEAD_MS before that
+            if let Some(d) = tok.get("t_dtw").and_then(|x| x.as_i64()).filter(|&d| d >= 0) {
+                a = a.max(d * DTW_UNIT_MS - DTW_LEAD_MS).min(to);
+                b = b.max(a);
+            }
             // the space a piece starts with takes no time
             let sp = t.iter().take_while(|&&c| c == b' ').count();
             let n = (t.len() - sp).max(1) as i64;
@@ -402,6 +464,40 @@ pub fn parse(bytes: &[u8]) -> Vec<Sentence> {
             let n = text.len().max(1) as i64;
             at = (0..text.len() as i64).map(|i| (from + (to - from) * i / n, from + (to - from) * (i + 1) / n)).collect();
         }
+        out.extend(timed(text, at, from, to));
+    }
+    out
+}
+
+/// A sentence from pieces of text, each with the ms it was heard from..to on the timeline (an
+/// online recogniser's words). It starts at its first piece and ends at its last; words are
+/// found and timed as for the engine's answer.
+pub fn sentence_from_pieces(pieces: &[(String, i64, i64)]) -> Option<Sentence> {
+    let from = pieces.iter().find(|p| !p.0.trim().is_empty())?.1;
+    let to = pieces.iter().rev().find(|p| !p.0.trim().is_empty())?.2;
+    let mut text = vec![];
+    let mut at = vec![];
+    for (t, a, b) in pieces {
+        let (a, b) = (*a, (*b).max(*a));
+        let t = t.as_bytes();
+        let sp = t.iter().take_while(|&&c| c == b' ').count();
+        let n = (t.len() - sp).max(1) as i64;
+        for (i, &byte) in t.iter().enumerate() {
+            text.push(byte);
+            if i < sp {
+                at.push((a, a));
+            } else {
+                let i = (i - sp) as i64;
+                at.push((a + (b - a) * i / n, a + (b - a) * (i + 1) / n));
+            }
+        }
+    }
+    timed(text, at, from, to.max(from + 1))
+}
+
+/// The sentence for this text, each of its bytes heard at `at`, between `from` and `to` ms.
+fn timed(text: Vec<u8>, at: Vec<(i64, i64)>, from: i64, to: i64) -> Option<Sentence> {
+    {
         // each character's time, from its bytes
         let decoded = String::from_utf8_lossy(&text).to_string();
         let mut char_at: Vec<(i64, i64)> = vec![];
@@ -418,7 +514,7 @@ pub fn parse(bytes: &[u8]) -> Vec<Sentence> {
         let lead = decoded.chars().take_while(|c| c.is_whitespace()).count();
         let content = decoded.trim().to_string();
         if content.is_empty() {
-            continue;
+            return None;
         }
         let chars: Vec<char> = content.chars().collect();
         let len = (to - from) as i32;
@@ -434,9 +530,8 @@ pub fn parse(bytes: &[u8]) -> Vec<Sentence> {
             word_texts.push(chars[a..b].iter().collect::<String>());
         }
         stay_until_next(&mut times, len);
-        out.push(Sentence { start: from as f64 / 1000.0, end: to as f64 / 1000.0, text: content, words: times, word_texts });
+        Some(Sentence { start: from as f64 / 1000.0, end: to as f64 / 1000.0, text: content, words: times, word_texts })
     }
-    out
 }
 
 /// A word stays the one being said until the next one starts.
@@ -585,7 +680,7 @@ mod tests {
         p.place_free(TrackKind::Main, Clip::new(cid, Some(id), 0.0, dur));
         let mut pcm = HashMap::new();
         pcm.insert(id, Arc::new(crate::media::decode_audio(&path).unwrap()));
-        let o = Options { gpu: true, model: models().into_iter().next().expect("model"), general: general_model(), language: std::env::var("SPEECH_LANG").unwrap_or("auto".into()), music: false, max_len: CAPTION_MAX_BYTES };
+        let o = Options { gpu: true, model: models().into_iter().next().expect("model"), general: general_model(), language: std::env::var("SPEECH_LANG").unwrap_or("auto".into()), music: false, max_len: CAPTION_MAX_BYTES, cloud_key: None };
         let st = Arc::new(Mutex::new(State::default()));
         let s = run(p, &pcm, &o, &st).unwrap();
         for x in &s {
@@ -656,6 +751,27 @@ mod tests {
         refine(&mut s, &pcm);
         assert_eq!(s[0].words[1][0], 1600, "two starts when it's said");
         assert_eq!(s[0].words[0], [0, 1600]);
+    }
+
+    #[test]
+    fn dtw_times_stop_the_first_word_starting_at_zero() {
+        // the engine's answer for speech that starts at 3.12 s under background noise
+        let j = r#"{"transcription":[{"offsets":{"from":0,"to":4230},"text":" Welcome to my channel","tokens":[
+            {"text":"[_BEG_]","offsets":{"from":0,"to":0},"t_dtw":-1},
+            {"text":" Welcome","offsets":{"from":0,"to":1980},"t_dtw":340},
+            {"text":" to","offsets":{"from":1980,"to":2550},"t_dtw":364},
+            {"text":" my","offsets":{"from":2550,"to":3120},"t_dtw":382},
+            {"text":" channel","offsets":{"from":3120,"to":4230},"t_dtw":420}]}]}"#;
+        let mut s = parse(j.as_bytes());
+        start_at_first_word(&mut s);
+        assert!((s[0].start - 3.1).abs() < 1e-9, "starts near the talking, not 0:00: {}", s[0].start);
+        assert_eq!(s[0].words[0][0], 0);
+        assert_eq!(s[0].words[1][0], 3340 - 3100, "\"to\" heard from 3.34 s");
+        assert_eq!(s[0].end, 4.23);
+        assert_eq!(dtw_preset(Path::new("thonburian-large-v3-q5_0.bin")), Some("large.v3"));
+        assert_eq!(dtw_preset(Path::new("ggml-large-v3-turbo-q5_0.bin")), Some("large.v3.turbo"));
+        assert_eq!(dtw_preset(Path::new("ggml-small.en.bin")), Some("small.en"));
+        assert_eq!(dtw_preset(Path::new("mystery.bin")), None);
     }
 
     #[test]

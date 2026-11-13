@@ -4,6 +4,7 @@ mod app;
 mod audio;
 mod decode;
 mod details;
+mod eleven;
 mod export;
 mod home;
 mod layout;

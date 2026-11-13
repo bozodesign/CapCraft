@@ -536,7 +536,8 @@ impl App {
                 self.export_srt();
             }
         });
-        let ready = crate::speech::engine().is_some() && self.speech_model().is_some();
+        let cloud = self.layouts.speech_cloud;
+        let ready = if cloud { !self.layouts.eleven_key.trim().is_empty() } else { crate::speech::engine().is_some() && self.speech_model().is_some() };
         let job = self.speech_job.as_ref().map(|j| {
             let g = j.lock().unwrap_or_else(|e| e.into_inner());
             (g.stage.clone(), g.progress)
@@ -560,13 +561,14 @@ impl App {
             }
             None => {
                 let b = egui::Button::new(egui::RichText::new("🎤  Auto captions").strong().color(Color32::WHITE)).fill(ACCENT).min_size(Vec2::new(ui.available_width(), 30.0));
-                let where_ = if self.layouts.speech_gpu { "graphics card" } else { "processor" };
-                let r = ui.add_enabled(ready, b).on_hover_text(format!("Listen to the video's sound and add captions from what's said, worked out on this computer ({where_}). Change this in Settings."));
+                let where_ = if cloud { "online by ElevenLabs" } else if self.layouts.speech_gpu { "on this computer (graphics card)" } else { "on this computer (processor)" };
+                let r = ui.add_enabled(ready, b).on_hover_text(format!("Listen to the video's sound and add captions from what's said, heard {where_}. Change this in Settings."));
                 if r.clicked() {
                     self.start_auto_captions();
                 }
                 if !ready {
-                    ui.label(egui::RichText::new("The speech engine or its model isn't installed.").color(Color32::from_rgb(240, 170, 80)).size(11.0));
+                    let why = if cloud { "Put your ElevenLabs API key in Settings → Auto captions." } else { "The speech engine or its model isn't installed." };
+                    ui.label(egui::RichText::new(why).color(Color32::from_rgb(240, 170, 80)).size(11.0));
                 }
             }
         }

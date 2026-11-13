@@ -93,6 +93,9 @@ struct LayoutFile {
     speech_language: String,
     #[serde(default)]
     speech_music: bool,
+    /// Auto captions heard online by ElevenLabs (its key is kept in its own file).
+    #[serde(default)]
+    speech_cloud: bool,
     /// Image duration: unit "s" or "f" (as the original keeps it), seconds and frames.
     #[serde(default)]
     image_unit: String,
@@ -122,6 +125,11 @@ pub struct Layouts {
     pub speech_model: String,
     pub speech_language: String,
     pub speech_music: bool,
+    /// Auto captions heard online by ElevenLabs instead, with the person's API key (kept in
+    /// elevenlabs-key.txt in the settings folder, not in this layout file).
+    pub speech_cloud: bool,
+    pub eleven_key: String,
+    key_written: String,
     /// How long an added picture lasts (Settings): in frames instead of seconds, and each value.
     pub image_frames_unit: bool,
     pub image_secs: f64,
@@ -137,18 +145,23 @@ fn file() -> PathBuf {
     crate::projects::settings_dir().join("layouts.json")
 }
 
+fn key_file() -> PathBuf {
+    crate::projects::settings_dir().join("elevenlabs-key.txt")
+}
+
 impl Layouts {
     pub fn load() -> Self {
         let f: LayoutFile = std::fs::read_to_string(file()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let key = std::fs::read_to_string(key_file()).map(|k| k.trim().to_string()).unwrap_or_default();
         let dock = f.current.filter(complete).unwrap_or_else(|| preset(0));
         let saved = f.saved.into_iter().filter(|(_, d)| complete(d)).collect();
-        let mut l = Layouts { dock: Some(dock), saved, new_name: String::new(), phone_overlay: f.phone_overlay.min(3), safe_area: f.safe_area, channel_name: f.channel_name, avatar_path: f.avatar_path, speech_gpu: !f.speech_cpu, speech_model: f.speech_model, speech_language: if f.speech_language.is_empty() { "auto".into() } else { f.speech_language }, speech_music: f.speech_music, image_frames_unit: f.image_unit == "f", image_secs: f.image_secs.unwrap_or(crate::model::IMAGE_DEFAULT_LEN), image_frames: f.image_frames.unwrap_or(crate::model::IMAGE_FRAMES_DEFAULT), large_step: f.large_step.unwrap_or(crate::model::LARGE_STEP_DEFAULT).clamp(crate::model::LARGE_STEP_MIN, crate::model::LARGE_STEP_MAX), written: String::new(), checked: Instant::now(), readonly: false };
+        let mut l = Layouts { dock: Some(dock), saved, new_name: String::new(), phone_overlay: f.phone_overlay.min(3), safe_area: f.safe_area, channel_name: f.channel_name, avatar_path: f.avatar_path, speech_gpu: !f.speech_cpu, speech_model: f.speech_model, speech_language: if f.speech_language.is_empty() { "auto".into() } else { f.speech_language }, speech_music: f.speech_music, speech_cloud: f.speech_cloud, eleven_key: key.clone(), key_written: key, image_frames_unit: f.image_unit == "f", image_secs: f.image_secs.unwrap_or(crate::model::IMAGE_DEFAULT_LEN), image_frames: f.image_frames.unwrap_or(crate::model::IMAGE_FRAMES_DEFAULT), large_step: f.large_step.unwrap_or(crate::model::LARGE_STEP_DEFAULT).clamp(crate::model::LARGE_STEP_MIN, crate::model::LARGE_STEP_MAX), written: String::new(), checked: Instant::now(), readonly: false };
         l.written = l.json();
         l
     }
 
     fn json(&self) -> String {
-        let f = LayoutFile { current: self.dock.clone(), saved: self.saved.clone(), phone_overlay: self.phone_overlay, safe_area: self.safe_area, channel_name: self.channel_name.clone(), avatar_path: self.avatar_path.clone(), speech_cpu: !self.speech_gpu, speech_model: self.speech_model.clone(), speech_language: self.speech_language.clone(), speech_music: self.speech_music, image_unit: if self.image_frames_unit { "f".into() } else { "s".into() }, image_secs: Some(self.image_secs), image_frames: Some(self.image_frames), large_step: Some(self.large_step) };
+        let f = LayoutFile { current: self.dock.clone(), saved: self.saved.clone(), phone_overlay: self.phone_overlay, safe_area: self.safe_area, channel_name: self.channel_name.clone(), avatar_path: self.avatar_path.clone(), speech_cpu: !self.speech_gpu, speech_model: self.speech_model.clone(), speech_language: self.speech_language.clone(), speech_music: self.speech_music, speech_cloud: self.speech_cloud, image_unit: if self.image_frames_unit { "f".into() } else { "s".into() }, image_secs: Some(self.image_secs), image_frames: Some(self.image_frames), large_step: Some(self.large_step) };
         serde_json::to_string_pretty(&f).unwrap_or_default()
     }
 
@@ -157,6 +170,10 @@ impl Layouts {
         if j != self.written && !self.readonly {
             let _ = std::fs::write(file(), &j);
             self.written = j;
+        }
+        if self.eleven_key != self.key_written && !self.readonly {
+            let _ = std::fs::write(key_file(), self.eleven_key.trim());
+            self.key_written = self.eleven_key.clone();
         }
     }
 

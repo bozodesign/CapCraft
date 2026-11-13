@@ -958,19 +958,49 @@ impl App {
             ui.add_space(10.0);
             ui.separator();
             ui.label(egui::RichText::new("Auto captions").strong().size(14.0));
-            ui.label(egui::RichText::new("Captions made from what's said in your video, worked out on this computer (no internet).").color(MUTED).size(11.5));
+            ui.label(egui::RichText::new("Captions made from what's said in your video.").color(MUTED).size(11.5));
             ui.add_space(6.0);
-            let engine = crate::speech::engine();
             ui.horizontal(|ui| {
+                ui.add_sized([110.0, 20.0], egui::Label::new(egui::RichText::new("Heard by").color(MUTED)));
+                ui.vertical(|ui| {
+                    ui.radio_value(&mut self.layouts.speech_cloud, false, "This computer (whisper, no internet)");
+                    ui.radio_value(&mut self.layouts.speech_cloud, true, "ElevenLabs (online, your API key)").on_hover_text("Usually hears more words, with exact word times. The video's sound is sent to ElevenLabs and uses your ElevenLabs credits.");
+                });
+            });
+            if self.layouts.speech_cloud {
+                ui.horizontal(|ui| {
+                    ui.add_sized([110.0, 20.0], egui::Label::new(egui::RichText::new("API key").color(MUTED)));
+                    let show_id = egui::Id::new("eleven-key-show");
+                    let mut show = ui.data(|d| d.get_temp::<bool>(show_id)).unwrap_or(false);
+                    ui.add(egui::TextEdit::singleline(&mut self.layouts.eleven_key).password(!show).hint_text("xi-api-key from elevenlabs.io").desired_width(220.0));
+                    if ui.selectable_label(show, "👁").on_hover_text(if show { "Hide the key" } else { "Show the key" }).clicked() {
+                        show = !show;
+                    }
+                    ui.data_mut(|d| d.insert_temp(show_id, show));
+                });
+                ui.horizontal(|ui| {
+                    ui.add_sized([110.0, 20.0], egui::Label::new(""));
+                    ui.label(egui::RichText::new("Make one at elevenlabs.io → your profile → API keys (it needs Speech to Text). It's kept only on this computer.").color(MUTED).size(11.0));
+                });
+                if self.layouts.eleven_key.trim().is_empty() {
+                    ui.horizontal(|ui| {
+                        ui.add_sized([110.0, 20.0], egui::Label::new(""));
+                        ui.label(egui::RichText::new("Put your API key here to use ElevenLabs.").color(Color32::from_rgb(240, 170, 80)).size(11.0));
+                    });
+                }
+            }
+            let engine = crate::speech::engine();
+            ui.add_enabled_ui(!self.layouts.speech_cloud, |ui| ui.horizontal(|ui| {
                 ui.add_sized([110.0, 20.0], egui::Label::new(egui::RichText::new("Run on").color(MUTED)));
                 ui.vertical(|ui| {
                     ui.radio_value(&mut self.layouts.speech_gpu, true, "Graphics card (CUDA), fast").on_hover_text("Needs an NVIDIA graphics card");
                     ui.radio_value(&mut self.layouts.speech_gpu, false, "Processor (CPU), much slower").on_hover_text("Works without a graphics card");
                 });
-            });
+            }));
             let models = crate::speech::models();
             let current = self.speech_model();
-            ui.horizontal(|ui| {
+            let cloud = self.layouts.speech_cloud;
+            ui.add_enabled_ui(!cloud, |ui| ui.horizontal(|ui| {
                 ui.add_sized([110.0, 20.0], egui::Label::new(egui::RichText::new("Thai model").color(MUTED)));
                 let label = current.as_deref().map(crate::speech::model_label).unwrap_or_else(|| "None found".into());
                 egui::ComboBox::from_id_salt("speech-model").width(220.0).selected_text(label).show_ui(ui, |ui| {
@@ -981,7 +1011,7 @@ impl App {
                         }
                     }
                 });
-            });
+            }));
             ui.horizontal(|ui| {
                 ui.add_sized([110.0, 20.0], egui::Label::new(egui::RichText::new("Language").color(MUTED)));
                 let name = crate::speech::language_name(&self.layouts.speech_language);
@@ -998,6 +1028,8 @@ impl App {
             ui.label(egui::RichText::new("Captions are written in the language that is spoken, never translated. Thai speech is heard by the Thai model, other languages by the general model.").color(MUTED).size(11.0));
             let general = crate::speech::general_model();
             let (txt, col) = match (&engine, &current) {
+                _ if cloud && self.layouts.eleven_key.trim().is_empty() => ("ElevenLabs needs your API key.".to_string(), Color32::from_rgb(240, 170, 80)),
+                _ if cloud => ("ElevenLabs will hear the speech (internet needed).".to_string(), MUTED),
                 (Some(_), Some(_)) if general.is_none() => ("Only Thai speech can be heard: the general model (whisper/models-general) is missing.".to_string(), Color32::from_rgb(240, 170, 80)),
                 (Some(_), Some(_)) => ("Speech engine ready.".to_string(), MUTED),
                 (None, _) => ("The speech engine wasn't found (the whisper folder beside the program).".to_string(), Color32::from_rgb(240, 170, 80)),
@@ -1643,13 +1675,22 @@ impl App {
         if self.speech_job.is_some() {
             return;
         }
-        if crate::speech::engine().is_none() {
+        let cloud_key = self.layouts.speech_cloud.then(|| self.layouts.eleven_key.trim().to_string());
+        if cloud_key.as_deref() == Some("") {
+            self.notify("Put your ElevenLabs API key in Settings → Auto captions");
+            return;
+        }
+        if cloud_key.is_none() && crate::speech::engine().is_none() {
             self.notify("The speech engine isn't installed");
             return;
         }
-        let Some(model) = self.speech_model() else {
-            self.notify("No speech model found");
-            return;
+        let model = match (self.speech_model(), &cloud_key) {
+            (Some(m), _) => m,
+            (None, Some(_)) => PathBuf::new(),
+            (None, None) => {
+                self.notify("No speech model found");
+                return;
+            }
         };
         self.stop();
         let o = crate::speech::Options {
@@ -1659,6 +1700,7 @@ impl App {
             language: self.layouts.speech_language.clone(),
             music: self.layouts.speech_music,
             max_len: crate::speech::CAPTION_MAX_BYTES,
+            cloud_key,
         };
         let pcm = self.pcm.lock().unwrap_or_else(|e| e.into_inner()).clone();
         self.speech_job = Some(crate::speech::start(self.project.clone(), pcm, o));
