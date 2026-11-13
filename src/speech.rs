@@ -17,6 +17,18 @@ pub const SPEECH_RATE: u32 = 16_000;
 /// Longest caption line the engine makes, in bytes (about 20 Thai letters or 60 English ones).
 pub const CAPTION_MAX_BYTES: u32 = 60;
 
+/// The bar while listening, as the original's PollAsrResultNode::runStage (videoeditor.dll
+/// 0x182bff6b0) reports it: 20 % when listening starts, then the recogniser's own percent
+/// (kept to 0..100) × 3/5 + 20, and 80 % once it's ready.
+pub const SPEECH_PROGRESS_START: f32 = 20.0;
+pub const SPEECH_PROGRESS_SHARE: f32 = 3.0 / 5.0;
+pub const SPEECH_PROGRESS_READY: f32 = 80.0;
+
+/// The bar's share (0..1) for the recogniser's own percent.
+pub fn shown_progress(percent: f32) -> f32 {
+    (percent.clamp(0.0, 100.0) * SPEECH_PROGRESS_SHARE + SPEECH_PROGRESS_START) / 100.0
+}
+
 /// One recognised sentence: timeline seconds, text, and its words' times in ms from `start`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Sentence {
@@ -214,7 +226,7 @@ fn run(mut p: Project, pcm: &HashMap<u64, Arc<Vec<i16>>>, o: &Options, st: &Arc<
     {
         let mut g = st.lock().unwrap_or_else(|e| e.into_inner());
         g.stage = if o.gpu { "Listening (graphics card)…".into() } else { "Listening (processor)…".into() };
-        g.progress = 0.0;
+        g.progress = SPEECH_PROGRESS_START / 100.0;
     }
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8);
     let base = |model: &Path| {
@@ -258,7 +270,7 @@ fn run(mut p: Project, pcm: &HashMap<u64, Arc<Vec<i16>>>, o: &Options, st: &Arc<
             if let Some(i) = l.find("progress =") {
                 let n: String = l[i + 10..].chars().filter(|c| c.is_ascii_digit()).collect();
                 if let Ok(v) = n.parse::<f32>() {
-                    st3.lock().unwrap_or_else(|e| e.into_inner()).progress = (v / 100.0).clamp(0.0, 1.0);
+                    st3.lock().unwrap_or_else(|e| e.into_inner()).progress = shown_progress(v);
                 }
             }
             let mut t = tail2.lock().unwrap_or_else(|e| e.into_inner());
@@ -289,6 +301,7 @@ fn run(mut p: Project, pcm: &HashMap<u64, Arc<Vec<i16>>>, o: &Options, st: &Arc<
             Err(e) => return Err(e.to_string()),
         }
     }
+    st.lock().unwrap_or_else(|e| e.into_inner()).progress = SPEECH_PROGRESS_READY / 100.0;
     let bytes = std::fs::read(out.with_extension("json")).map_err(|e| format!("The speech engine gave no answer: {e}"))?;
     let pcm = read_wav(&wav);
     let _ = std::fs::remove_dir_all(&dir);
@@ -302,7 +315,10 @@ fn run(mut p: Project, pcm: &HashMap<u64, Arc<Vec<i16>>>, o: &Options, st: &Arc<
 
 /// The engine's first sentence often begins at 0:00 even when the talking begins later; its
 /// first word knows better. Each caption begins where its first word is heard, and its word
-/// times move with it, so the caption shows up when the speaking starts.
+/// times move with it, so the caption shows up when the speaking starts. The original does the
+/// same: a caption's start is the recogniser's `start_time` for the sentence (ms × 1000, its
+/// first word; the utterance parser 0x182c21d50), and a piece split from a sentence starts at
+/// its first word's `start_time` × 1000 (0x182c1a700), which is never before the sentence's.
 pub fn start_at_first_word(sentences: &mut [Sentence]) {
     for s in sentences.iter_mut() {
         let len = ((s.end - s.start) * 1000.0).round() as i32;
@@ -576,7 +592,7 @@ mod tests {
             println!("{:.2}-{:.2} {:?}", x.start, x.end, x.text);
         }
         assert!(s.iter().any(|x| x.text.to_lowercase().contains("channel")));
-        assert!(st.lock().unwrap_or_else(|e| e.into_inner()).progress > 0.99, "progress was read");
+        assert!(st.lock().unwrap_or_else(|e| e.into_inner()).progress >= SPEECH_PROGRESS_READY / 100.0 - 1e-6, "progress was read");
     }
 
     #[test]
@@ -640,6 +656,13 @@ mod tests {
         refine(&mut s, &pcm);
         assert_eq!(s[0].words[1][0], 1600, "two starts when it's said");
         assert_eq!(s[0].words[0], [0, 1600]);
+    }
+
+    #[test]
+    fn the_bar_follows_the_originals_share() {
+        for (p, want) in [(0.0, 0.2), (50.0, 0.5), (100.0, 0.8), (150.0, 0.8), (-5.0, 0.2)] {
+            assert!((shown_progress(p) - want).abs() < 1e-6, "{p} → {}", shown_progress(p));
+        }
     }
 
     #[test]
