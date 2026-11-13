@@ -2,6 +2,7 @@
 
 mod app;
 mod audio;
+mod cover;
 mod decode;
 mod details;
 mod eleven;

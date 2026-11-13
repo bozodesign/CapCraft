@@ -136,6 +136,10 @@ pub struct App {
 
     pub export_dialog: Option<ExportDialog>,
     pub export_status: Option<Arc<Mutex<export::Status>>>,
+    /// The cover being made for the video just exported.
+    pub export_cover: Option<crate::cover::Cover>,
+    /// The kind of cover last chosen (its saved name), so the next export starts there.
+    pub cover_kind: &'static str,
     pub toast: Option<(String, Instant)>,
     pub project_path: Option<PathBuf>,
     pub show_shortcuts: bool,
@@ -391,6 +395,8 @@ impl App {
             gizmo: None,
             export_dialog: None,
             export_status: None,
+            export_cover: None,
+            cover_kind: crate::cover::DEFAULT_KIND.name(),
             toast: None,
             project_path: None,
             show_shortcuts: false,
@@ -444,6 +450,11 @@ impl App {
             app.voice.open = std::env::var_os("CUTSTUDIO_SHOT_VOICE").is_some();
             if let Some(v) = std::env::var_os("CUTSTUDIO_SHOT_LIBRARY") {
                 app.open_voice_library(if v == "person" { Some(0) } else { None });
+            }
+            // the finished-export window for a video already made, with its cover part
+            if let Some(v) = std::env::var_os("CUTSTUDIO_SHOT_COVER") {
+                app.open_export();
+                app.export_status = Some(Arc::new(Mutex::new(export::Status { done: true, progress: 1.0, out_path: v.to_string_lossy().into(), ..Default::default() })));
             }
         }
         app.build_filter_previews(&cc.egui_ctx);
@@ -1943,6 +1954,19 @@ impl App {
         let status = self.export_status.as_ref().map(|s| (s.clone(), s.lock().unwrap_or_else(|e| e.into_inner()).clone()));
         let duration = self.project.duration();
         let sizes: Vec<(usize, usize)> = export::RESOLUTIONS.iter().map(|r| export::output_size(&self.project, r.1)).collect();
+        // a finished video can be given a cover
+        match &status {
+            Some((_, s)) if s.done && s.error.is_none() => {
+                let video = PathBuf::from(&s.out_path);
+                if self.export_cover.as_ref().map(|c| c.video != video).unwrap_or(true) {
+                    self.export_cover = Some(crate::cover::Cover::new(video, duration, self.cover_kind));
+                }
+                if let Some(c) = &self.export_cover {
+                    self.cover_kind = c.kind.name();
+                }
+            }
+            _ => self.export_cover = None,
+        }
         egui::Window::new("Export").collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).open(&mut open).show(ctx, |ui| {
             ui.set_width(380.0);
             if let Some((st, s)) = &status {
@@ -1966,8 +1990,13 @@ impl App {
                         if ui.button("📂").on_hover_text("Show in folder").clicked() {
                             let _ = std::process::Command::new("explorer").arg(format!("/select,{}", s.out_path)).spawn();
                         }
+                        if let Some(c) = self.export_cover.as_mut() {
+                            ui.separator();
+                            c.ui(ui);
+                        }
                     }
                 }
+                ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     if ui.button("Export again").clicked() {
                         again = true;
@@ -2081,6 +2110,7 @@ impl App {
             }
             self.export_dialog = None;
             self.export_status = None;
+            self.export_cover = None;
         }
     }
 
