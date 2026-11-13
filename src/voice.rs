@@ -470,13 +470,30 @@ pub fn tempo(speed: f64) -> Option<String> {
     Some(steps.join(","))
 }
 
+/// Keeping the original's mood: Speech to Speech carries over how each line was said (its
+/// emotion, emphasis, pace and pauses); a low stability lets the new voice follow that closely
+/// instead of evening it out, no style exaggeration keeps the new voice's own manner from
+/// replacing it, and a high similarity keeps the new voice recognisable.
+pub const MOOD_STABILITY: f32 = 0.3;
+pub const MOOD_SIMILARITY: f32 = 0.8;
+pub const MOOD_STYLE: f32 = 0.0;
+
+/// The voice settings sent with each request when the original's mood is kept.
+pub fn mood_settings() -> String {
+    format!(r#"{{"stability":{MOOD_STABILITY},"similarity_boost":{MOOD_SIMILARITY},"style":{MOOD_STYLE},"use_speaker_boost":true}}"#)
+}
+
 /// The settings for one Speech to Speech request: the sound in, the new voice's MP3 out.
-pub fn sts_config(file: &Path, out: &Path, key: &str, voice: &str, clean: bool) -> String {
+pub fn sts_config(file: &Path, out: &Path, key: &str, voice: &str, clean: bool, keep_mood: bool) -> String {
     let mut c = String::new();
     c += &format!("url = {}\n", quoted(&format!("{STS_URL}/{}?output_format={STS_FORMAT}", safe_id(voice))));
     c += &key_header(key);
     c += &format!("form = {}\n", quoted(&format!("model_id={STS_MODEL}")));
     c += &format!("form = {}\n", quoted(&format!("remove_background_noise={clean}")));
+    if keep_mood {
+        // taken word for word, so the JSON's characters mean nothing to curl
+        c += &format!("form-string = {}\n", quoted(&format!("voice_settings={}", mood_settings())));
+    }
     c += &format!("form = {}\n", quoted(&format!("audio=@{}", file.display())));
     c += &format!("output = {}\n", quoted(&out.display().to_string()));
     c += &curl_tail();
@@ -585,7 +602,7 @@ pub fn find_speakers(ffmpeg: PathBuf, src: Source, base: PathBuf, key: String, l
 }
 
 /// Send each person's parts as their pick says; `picks[i]` is for person i.
-pub fn change(ffmpeg: PathBuf, found: Found, mut picks: Vec<Pick>, key: String, clean: bool, clip_name: String) -> Arc<Mutex<Job>> {
+pub fn change(ffmpeg: PathBuf, found: Found, mut picks: Vec<Pick>, key: String, clean: bool, keep_mood: bool, clip_name: String) -> Arc<Mutex<Job>> {
     spawn("Changing voices…", move |st| {
         if picks.iter().any(|p| matches!(p, Pick::Clean | Pick::Remake)) && enhance_too_long(found.source.duration) {
             return Err(format!("Enhancing a voice works on clips up to {ENHANCE_MAX_MINUTES} minutes; cut the clip shorter first"));
@@ -672,7 +689,7 @@ pub fn change(ffmpeg: PathBuf, found: Found, mut picks: Vec<Pick>, key: String, 
             let out = found.dir.join(format!("person{}-{}-{n}.mp3", i + 1, safe_id(&vname).chars().take(20).collect::<String>()));
             let cancel = || cancelled(st);
             let config = match v {
-                Some(v) => sts_config(&input, &out, &key, &v.id, clean),
+                Some(v) => sts_config(&input, &out, &key, &v.id, clean, keep_mood),
                 None => isolation_config(&input, &out, &key),
             };
             let (_, code) = curl(&config, &cancel)?;
@@ -729,6 +746,8 @@ pub struct Panel {
     /// Background kept under enhanced voices, 0–100.
     pub ambient: i32,
     pub clean: bool,
+    /// The new voices follow the original's mood and delivery.
+    pub keep_mood: bool,
     pub note: String,
     /// The voice library window (voicelib.rs).
     pub library: crate::voicelib::Library,
@@ -736,7 +755,7 @@ pub struct Panel {
 
 impl Default for Panel {
     fn default() -> Self {
-        Panel { open: false, job: None, found: None, picks: vec![], store: Store::load(), seen: None, checked: std::time::Instant::now(), describe: String::new(), name: String::new(), mute_original: true, ambient: AMBIENT_DEFAULT, clean: true, note: String::new(), library: Default::default() }
+        Panel { open: false, job: None, found: None, picks: vec![], store: Store::load(), seen: None, checked: std::time::Instant::now(), describe: String::new(), name: String::new(), mute_original: true, ambient: AMBIENT_DEFAULT, clean: true, keep_mood: true, note: String::new(), library: Default::default() }
     }
 }
 
@@ -912,6 +931,10 @@ impl crate::app::App {
                     });
                 }
                 ui.checkbox(&mut v.clean, "Remove background noise");
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut v.keep_mood, "Keep the original's mood");
+                    theme::hint(ui, "The new voice says each line the way the person said it: the same feeling, emphasis, pace and pauses. Off, the new voice evens the delivery out into its own steadier manner.");
+                });
                 let any = v.picks.iter().any(|p| !p.is_empty());
                 ui.add_enabled_ui(any && !v.busy(), |ui| {
                     if theme::primary_button(ui, "Change voices", "Send each person's parts with their new voice; each comes back on its own sound track").clicked() {
@@ -975,7 +998,7 @@ impl crate::app::App {
                     let picks = self.voice.picks.iter().map(|id| Pick::from_id(id, &self.voice.store)).collect();
                     let clip = source.as_ref().map(|s| s.1.clone()).unwrap_or_default();
                     self.voice.note.clear();
-                    self.voice.job = Some(change(ff, f, picks, key, self.voice.clean, clip));
+                    self.voice.job = Some(change(ff, f, picks, key, self.voice.clean, self.voice.keep_mood, clip));
                 }
             }
             Some("design") => {
@@ -1272,10 +1295,16 @@ mod tests {
 
     #[test]
     fn the_voice_change_request_and_answers() {
-        let c = sts_config(Path::new(r"C:\t\in.flac"), Path::new(r"C:\t\out.mp3"), "k", "abc/../x?y", true);
+        let c = sts_config(Path::new(r"C:\t\in.flac"), Path::new(r"C:\t\out.mp3"), "k", "abc/../x?y", true, true);
         assert!(c.contains("speech-to-speech/abcxy?output_format=mp3_44100_128"), "the id can't change the address: {c}");
         assert!(c.contains("model_id=eleven_multilingual_sts_v2"));
         assert!(c.contains("remove_background_noise=true"));
+        // the original's mood: expressive settings sent as JSON, only when asked for
+        assert!(c.contains(r#"voice_settings={\"stability\":0.3,\"similarity_boost\":0.8,\"style\":0,\"use_speaker_boost\":true}"#), "{c}");
+        let plain = sts_config(Path::new("in.flac"), Path::new("out.mp3"), "k", "abc", false, false);
+        assert!(!plain.contains("voice_settings"));
+        let m: serde_json::Value = serde_json::from_str(&mood_settings()).unwrap();
+        assert_eq!(m["stability"].as_f64().unwrap() as f32, MOOD_STABILITY);
         assert!(c.contains(r#"output = "C:\\t\\out.mp3""#));
         let v = parse_voices(r#"{"voices":[{"voice_id":"v1","name":"Rachel","description":"calm"},{"name":"no id"}]}"#).unwrap();
         assert_eq!(v, vec![Voice { id: "v1".into(), name: "Rachel".into(), description: "calm".into(), ..Default::default() }]);
