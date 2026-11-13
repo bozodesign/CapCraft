@@ -1120,6 +1120,49 @@ impl TextCase {
     pub const BUTTONS: [(TextCase, &'static str, &'static str); 3] =
         [(TextCase::Title, "Tt", "Title case"), (TextCase::Upper, "TT", "Uppercase"), (TextCase::Lower, "tt", "Lowercase")];
 
+    /// The name the original stores (CaptionCapital::GetCapitalByType 0x1827f1ad0): type 0 "upper",
+    /// 1 "lower", 7 "mixed", anything else "none".
+    pub fn capital(self) -> &'static str {
+        match self {
+            TextCase::Upper => "upper",
+            TextCase::Lower => "lower",
+            TextCase::Title => "mixed",
+            TextCase::None => "none",
+        }
+    }
+
+    /// The original's rich-style slot for this case (UpdateRichCapitalStylesFromTextLayer
+    /// 0x182817b50): upper 11, lower 12, mixed 13; only one is ever on, none turns all off.
+    pub fn rich_style(self) -> Option<u8> {
+        match self {
+            TextCase::Upper => Some(11),
+            TextCase::Lower => Some(12),
+            TextCase::Title => Some(13),
+            TextCase::None => None,
+        }
+    }
+
+    /// The original's case type number (CaptionTextCaseType): upper 0, lower 1, mixed 7, none -1.
+    pub fn type_number(self) -> i32 {
+        match self {
+            TextCase::Upper => 0,
+            TextCase::Lower => 1,
+            TextCase::Title => 7,
+            TextCase::None => -1,
+        }
+    }
+
+    /// Reads a stored name back (CaptionCapital::GetTypeByCapital 0x1827f1ed0): an empty name is
+    /// "none"; "upper", "lower" and "mixed" are compared byte for byte; anything else is none.
+    pub fn from_capital(s: &str) -> TextCase {
+        match s {
+            "upper" => TextCase::Upper,
+            "lower" => TextCase::Lower,
+            "mixed" => TextCase::Title,
+            _ => TextCase::None,
+        }
+    }
+
     /// The text as shown. One letter stays one letter, so word positions and timings still fit.
     pub fn apply(self, s: &str) -> String {
         let up = |c: char| if c.to_uppercase().count() == 1 { c.to_uppercase().next().unwrap_or(c) } else { c };
@@ -1873,6 +1916,18 @@ impl Project {
         v
     }
 
+    /// The letter case belongs to the captions as a whole, not to one line: the original keeps one
+    /// "upper"/"lower"/"mixed"/"none" for the draft's caption page (CaptionCapital::IsCapitalEnabled
+    /// 0x1827f2210 and SetCaptionInfoCapital 0x1827f2650 take the Draft), so changing it on one
+    /// caption changes every caption, even with "Same style for all" off.
+    pub fn set_caption_case(&mut self, case: TextCase) {
+        for (ti, ci) in self.captions() {
+            if let Some(s) = &mut self.tracks[ti].clips[ci].text {
+                s.case = case;
+            }
+        }
+    }
+
     /// Enter in the caption list (the original's SplitTextContent, TextClient::splitText
     /// 0x181847a90): the words before the cursor stay, the rest become a new caption right
     /// after it. The cut falls where the first moved word was heard, or else by the share of
@@ -2086,6 +2141,34 @@ mod case_tests {
         assert_eq!(TextCase::Title.apply("\u{e2a}\u{e27}\u{e31}\u{e2a} hello"), "\u{e2a}\u{e27}\u{e31}\u{e2a} Hello");
         assert_eq!(TextCase::Upper.apply("stra\u{df}e").chars().count(), 6, "never longer than typed");
         assert_eq!(TextCase::None.apply("MiXed"), "MiXed");
+        // the stored names and type numbers (GetCapitalByType 0x1827f1ad0, GetTypeByCapital 0x1827f1ed0)
+        assert_eq!(TextCase::from_capital("upper"), TextCase::Upper);
+        assert_eq!(TextCase::from_capital("lower"), TextCase::Lower);
+        assert_eq!(TextCase::from_capital("mixed"), TextCase::Title);
+        assert_eq!(TextCase::from_capital(""), TextCase::None, "an empty capital reads as none");
+        assert_eq!(TextCase::from_capital("Upper"), TextCase::None, "compared byte for byte");
+        assert_eq!([TextCase::Upper.type_number(), TextCase::Lower.type_number(), TextCase::Title.type_number(), TextCase::None.type_number()], [0, 1, 7, -1]);
+        for k in [TextCase::None, TextCase::Upper, TextCase::Lower, TextCase::Title] {
+            assert_eq!(TextCase::from_capital(k.capital()), k);
+        }
+        assert_eq!([TextCase::Upper, TextCase::Lower, TextCase::Title, TextCase::None].map(TextCase::rich_style), [Some(11), Some(12), Some(13), None]);
+    }
+
+    #[test]
+    fn the_letter_case_reaches_every_caption_but_not_titles() {
+        let mut p = Project::new("t");
+        p.captions_share_style = false;
+        let id = p.new_id();
+        p.tracks.push(Track { id, kind: TrackKind::Text, clips: vec![], muted: false, hidden: false, locked: false });
+        let ti = p.tracks.len() - 1;
+        for (n, (words, kind)) in [("one", TextKind::Caption), ("two", TextKind::Caption), ("big title", TextKind::Title)].into_iter().enumerate() {
+            let mut c = Clip::new(100 + n as u64, None, n as f64 * 2.0, 2.0);
+            c.text = Some(TextStyle::new(words, kind));
+            p.tracks[ti].clips.push(c);
+        }
+        p.set_caption_case(TextCase::Upper);
+        let cases: Vec<_> = p.tracks[ti].clips.iter().map(|c| c.text.as_ref().unwrap().case).collect();
+        assert_eq!(cases, vec![TextCase::Upper, TextCase::Upper, TextCase::None]);
     }
 
     #[test]

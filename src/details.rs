@@ -1134,6 +1134,9 @@ impl App {
                 }
             }
         }
+        if after.case != before.case && after.kind == TextKind::Caption {
+            self.project.set_caption_case(after.case);
+        }
         if after.kind == TextKind::Caption {
             ui.add_space(4.0);
             ui.checkbox(&mut self.project.captions_share_style, "Apply style to all captions");
