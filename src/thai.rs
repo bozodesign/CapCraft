@@ -87,9 +87,24 @@ pub trait ThaiEdit {
 
 impl<'t> ThaiEdit for egui::TextEdit<'t> {
     fn thai(self) -> Self {
-        // `layout` takes no room, so keeping it for the box's lifetime costs nothing
-        let l: &'static mut fn(&egui::Ui, &str, f32) -> Arc<egui::Galley> = Box::leak(Box::new(layout as fn(&egui::Ui, &str, f32) -> Arc<egui::Galley>));
-        self.layouter(l)
+        // A closure that holds nothing has no size, so boxing it takes no memory and keeping it
+        // costs nothing. (A boxed fn pointer was 8 bytes plus the allocator's share, lost for
+        // every text box on every frame: with a long caption list that ran the computer out of
+        // memory and the graphics driver crashed.)
+        self.layouter(no_room_layouter())
+    }
+}
+
+fn no_room_layouter() -> &'static mut (impl FnMut(&egui::Ui, &str, f32) -> Arc<egui::Galley> + 'static) {
+    Box::leak(Box::new(|u: &egui::Ui, s: &str, w: f32| layout(u, s, w)))
+}
+
+#[cfg(test)]
+mod leak_tests {
+    #[test]
+    fn the_thai_layouter_takes_no_memory() {
+        let l = super::no_room_layouter();
+        assert_eq!(std::mem::size_of_val(&*l), 0);
     }
 }
 

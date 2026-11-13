@@ -296,7 +296,29 @@ fn run(mut p: Project, pcm: &HashMap<u64, Arc<Vec<i16>>>, o: &Options, st: &Arc<
     if let Some(pcm) = pcm {
         refine(&mut s, &pcm);
     }
+    start_at_first_word(&mut s);
     Ok(s)
+}
+
+/// The engine's first sentence often begins at 0:00 even when the talking begins later; its
+/// first word knows better. Each caption begins where its first word is heard, and its word
+/// times move with it, so the caption shows up when the speaking starts.
+pub fn start_at_first_word(sentences: &mut [Sentence]) {
+    for s in sentences.iter_mut() {
+        let len = ((s.end - s.start) * 1000.0).round() as i32;
+        let Some(d) = s.words.first().map(|w| w[0]) else { continue };
+        // keep at least the shortest caption piece after the move
+        let keep = (crate::model::CAPTION_PIECE_MIN * 1000.0).ceil() as i32;
+        let d = d.min(len - keep);
+        if d <= 0 {
+            continue;
+        }
+        s.start += d as f64 / 1000.0;
+        for w in s.words.iter_mut() {
+            w[0] = (w[0] - d).max(0);
+            w[1] = (w[1] - d).max(w[0]);
+        }
+    }
 }
 
 /// The engine writes its text bytes as they are, so a token can hold half a Thai letter. Read
@@ -618,5 +640,28 @@ mod tests {
         refine(&mut s, &pcm);
         assert_eq!(s[0].words[1][0], 1600, "two starts when it's said");
         assert_eq!(s[0].words[0], [0, 1600]);
+    }
+
+    #[test]
+    fn the_first_caption_starts_when_the_talking_starts() {
+        // quiet 0-2.3 s, then speech: the engine still begins the sentence at 0
+        let r = SPEECH_RATE as usize;
+        let mut pcm = vec![0i16; 5 * r];
+        for (i, x) in pcm.iter_mut().enumerate() {
+            let t = i as f64 / r as f64;
+            if t >= 2.3 {
+                *x = ((t * 1400.0).sin() * 8000.0) as i16;
+            }
+        }
+        let mut s = vec![Sentence { start: 0.0, end: 5.0, text: "one two".into(), words: vec![[0, 3000], [3000, 5000]], word_texts: vec!["one".into(), "two".into()] }];
+        refine(&mut s, &pcm);
+        start_at_first_word(&mut s);
+        assert!((s[0].start - 2.3).abs() < 1e-9, "{}", s[0].start);
+        assert_eq!(s[0].end, 5.0, "the end stays");
+        assert_eq!(s[0].words, vec![[0, 700], [700, 2700]], "word times follow the new start");
+        // a sentence that already starts on its first word stays as it is
+        let mut t = vec![Sentence { start: 1.0, end: 2.0, text: "a".into(), words: vec![[0, 1000]], word_texts: vec!["a".into()] }];
+        start_at_first_word(&mut t);
+        assert_eq!((t[0].start, t[0].words[0]), (1.0, [0, 1000]));
     }
 }

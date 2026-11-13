@@ -6,6 +6,9 @@ use crate::model::*;
 use crate::theme::*;
 use egui::{Align2, Color32, FontId, Pos2, Rect, Response, Sense, Stroke, Vec2};
 
+/// The height a caption row is taken to have before it has been drawn once (CutStudio's own).
+const CAPTION_ROW_GUESS_H: f32 = 64.0;
+
 const TABS: [(LibTab, &str, &str); 8] = [
     (LibTab::Media, "🎬", "Media"),
     (LibTab::Mine, "⭐", "Mine"),
@@ -662,6 +665,16 @@ impl App {
             let active = self.playhead >= c.start && self.playhead < c.end();
             let hit = hits_now.contains(&id);
             let eid = egui::Id::new(("cap_edit", id));
+            // A long list from Auto captions: rows out of view only keep their room, so the list
+            // stays quick however many captions there are. The row being typed in, the chosen
+            // one and a search jump are always drawn.
+            let hid = egui::Id::new(("cap_row_h", id));
+            let h = ui.data(|d| d.get_temp::<f32>(hid)).unwrap_or(CAPTION_ROW_GUESS_H);
+            let room = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), h));
+            if !ui.is_rect_visible(room) && !selected && jump_to != Some(id) && !ui.memory(|m| m.has_focus(eid)) {
+                ui.allocate_space(room.size());
+                continue;
+            }
             let fr = egui::Frame::new()
                 .fill(if selected { BG3 } else { BG2 })
                 .stroke(Stroke::new(1.0_f32, if hit { Color32::from_rgb(255, 214, 10) } else if active { ACCENT } else { LINE }))
@@ -714,6 +727,7 @@ impl App {
                         }
                     }
                 });
+            ui.data_mut(|d| d.insert_temp(hid, fr.response.rect.height()));
             if fr.response.hovered() && !selected {
                 ui.painter().rect_stroke(fr.response.rect, 6.0, Stroke::new(1.0_f32, MUTED), egui::StrokeKind::Inside);
             }
