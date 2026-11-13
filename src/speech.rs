@@ -624,7 +624,7 @@ pub fn refine(sentences: &mut [Sentence], pcm: &[i16]) {
 }
 
 /// The samples of a 16-bit mono WAV file.
-fn read_wav(path: &Path) -> Option<Vec<i16>> {
+pub fn read_wav(path: &Path) -> Option<Vec<i16>> {
     let b = std::fs::read(path).ok()?;
     if b.len() < 12 || &b[0..4] != b"RIFF" || &b[8..12] != b"WAVE" {
         return None;

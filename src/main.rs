@@ -21,6 +21,7 @@ mod srt;
 mod thai;
 mod theme;
 mod voice;
+mod voicelib;
 mod timeline;
 mod winsound;
 mod words;

@@ -442,6 +442,9 @@ impl App {
             }
             app.show_settings = std::env::var_os("CUTSTUDIO_SHOT_SETTINGS").is_some();
             app.voice.open = std::env::var_os("CUTSTUDIO_SHOT_VOICE").is_some();
+            if std::env::var_os("CUTSTUDIO_SHOT_LIBRARY").is_some() {
+                app.open_voice_library(None);
+            }
         }
         app.build_filter_previews(&cc.egui_ctx);
         match open {
@@ -1421,6 +1424,26 @@ impl App {
             self.project.place_free(kind, c.clone());
         }
         self.selection = Selection::Clip(c.id);
+    }
+
+    /// Play a voice sample (the timeline stops first).
+    pub fn play_sample(&mut self, pcm: Vec<i16>, rate: u32) {
+        if self.playing {
+            self.stop();
+        }
+        self.player.play_pcm(pcm, rate);
+    }
+
+    pub fn stop_sample(&mut self) {
+        if !self.playing {
+            self.player.stop();
+        }
+        self.voice.library.playing = None;
+    }
+
+    /// A voice sample is still being heard.
+    pub fn sample_playing(&self) -> bool {
+        !self.playing && self.player.sounding()
     }
 
     pub fn separate_audio(&mut self) {

@@ -300,6 +300,31 @@ impl Player {
         true
     }
 
+    /// Play a sound buffer (a voice sample) on its own, mono at `rate`.
+    pub fn play_pcm(&mut self, samples: Vec<i16>, rate: u32) {
+        self.stop();
+        if !self.enabled || samples.is_empty() {
+            return;
+        }
+        if self.handle.is_none() || self.device != default_device_name() {
+            self.open();
+        }
+        if let Some(h) = &self.handle {
+            match rodio::Sink::try_new(h) {
+                Ok(sink) => {
+                    sink.append(rodio::buffer::SamplesBuffer::new(1, rate, samples));
+                    self.sink = Some(sink);
+                }
+                Err(e) => log(&format!("sample: no sound player: {e}")),
+            }
+        }
+    }
+
+    /// Something is still being played.
+    pub fn sounding(&self) -> bool {
+        self.sink.as_ref().map(|s| !s.empty()).unwrap_or(false)
+    }
+
     pub fn stop(&mut self) {
         if let Some(s) = self.sink.take() {
             s.stop();

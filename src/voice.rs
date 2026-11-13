@@ -43,6 +43,77 @@ pub const SPLIT_GAP_SECS: f64 = 3.0;
 pub const CHUNK_SECS: f64 = 240.0;
 /// The sound sent to ElevenLabs: one channel at 44.1 kHz.
 pub const SAMPLE_RATE: u32 = 44_100;
+/// Enhance, same voice cleaner: ElevenLabs' Voice Isolator keeps the voice and removes the rest.
+pub const ISOLATION_URL: &str = "https://api.elevenlabs.io/v1/audio-isolation";
+/// Enhance, same voice re-made: an instant clone of the person, then Speech to Speech with it.
+pub const CLONE_URL: &str = "https://api.elevenlabs.io/v1/voices/add";
+/// The most of a person's speech used to clone them (seconds); a minute or two clones best.
+pub const CLONE_MAX_SECS: f64 = 120.0;
+/// Under this much speech a clone sounds little like the person (seconds).
+pub const CLONE_MIN_SECS: f64 = 10.0;
+/// The two enhance choices, kept in a person's pick instead of a voice id.
+pub const PICK_CLEAN: &str = "@clean";
+pub const PICK_REMAKE: &str = "@remake";
+
+/// What happens to one person.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Pick {
+    Keep,
+    /// Another voice.
+    Voice(Voice),
+    /// Their own voice, cleaner (Voice Isolator).
+    Clean,
+    /// Their own voice re-made in studio quality (instant clone + Speech to Speech).
+    Remake,
+}
+
+impl Pick {
+    pub fn from_id(id: &str, store: &Store) -> Pick {
+        match id {
+            "" => Pick::Keep,
+            PICK_CLEAN => Pick::Clean,
+            PICK_REMAKE => Pick::Remake,
+            _ => store.voices.iter().find(|v| v.id == id).cloned().map(Pick::Voice).unwrap_or(Pick::Keep),
+        }
+    }
+}
+
+/// The settings for Voice Isolator: the sound in, the cleaned sound out.
+pub fn isolation_config(file: &Path, out: &Path, key: &str) -> String {
+    let mut c = format!("url = {}
+", quoted(ISOLATION_URL));
+    c += &key_header(key);
+    c += &format!("form = {}
+", quoted(&format!("audio=@{}", file.display())));
+    c += &format!("output = {}
+", quoted(&out.display().to_string()));
+    c += &curl_tail();
+    c
+}
+
+/// The settings for an instant voice clone from a person's speech.
+pub fn clone_config(file: &Path, key: &str, name: &str) -> String {
+    let name: String = name.chars().filter(|c| c.is_alphanumeric() || *c == ' ').collect();
+    let mut c = format!("url = {}
+", quoted(CLONE_URL));
+    c += &key_header(key);
+    c += &format!("form = {}
+", quoted(&format!("name={}", name.trim())));
+    c += &format!("form = {}
+", quoted(&format!("files=@{}", file.display())));
+    c += &format!("form = {}
+", quoted("remove_background_noise=true"));
+    c += &format!("form = {}
+", quoted("description=Made by CapCraft's voice changer from a clip, to re-make this person's own voice"));
+    c += &curl_tail();
+    c
+}
+
+/// The sound filter that keeps only a person's parts, one after the other (for cloning).
+pub fn only_parts(parts: &[(f64, f64)]) -> String {
+    let on: Vec<String> = parts.iter().map(|(a, b)| format!("between(t,{a:.3},{b:.3})")).collect();
+    format!("aselect='{}',asetpts=N/SR/TB", on.join("+"))
+}
 
 // ------------------------------------------------------------ the voice list
 
@@ -56,6 +127,26 @@ pub struct Voice {
     /// Made from a description (Voice Design), here or from Claude Code.
     #[serde(default)]
     pub designed: bool,
+    /// What ElevenLabs says it sounds like: "female", "young", "british", "narrative_story"...
+    #[serde(default)]
+    pub gender: String,
+    #[serde(default)]
+    pub age: String,
+    #[serde(default)]
+    pub accent: String,
+    #[serde(default)]
+    pub style: String,
+    #[serde(default)]
+    pub language: String,
+    /// ElevenLabs' public sample recording (free to hear).
+    #[serde(default)]
+    pub preview_url: String,
+    /// For a voice from the shared library not yet in the account: its owner's public id.
+    #[serde(default)]
+    pub owner: String,
+    /// Starred in the voice library.
+    #[serde(default)]
+    pub favorite: bool,
 }
 
 /// voices.json: the voices to choose from, and the voice picked for each person ("1", "2"...)
@@ -91,9 +182,21 @@ impl Store {
     pub fn add(&mut self, v: Voice) {
         match self.voices.iter_mut().find(|o| o.id == v.id) {
             Some(o) => {
-                let designed = o.designed || v.designed;
-                let description = if v.description.is_empty() { o.description.clone() } else { v.description.clone() };
-                *o = Voice { description, designed, ..v };
+                // what the new copy doesn't say is kept from the old one
+                let keep = |new: &String, old: &String| if new.is_empty() { old.clone() } else { new.clone() };
+                let n = Voice {
+                    description: keep(&v.description, &o.description),
+                    gender: keep(&v.gender, &o.gender),
+                    age: keep(&v.age, &o.age),
+                    accent: keep(&v.accent, &o.accent),
+                    style: keep(&v.style, &o.style),
+                    language: keep(&v.language, &o.language),
+                    preview_url: keep(&v.preview_url, &o.preview_url),
+                    designed: o.designed || v.designed,
+                    favorite: o.favorite || v.favorite,
+                    ..v
+                };
+                *o = n;
             }
             None => self.voices.push(v),
         }
@@ -133,15 +236,8 @@ pub fn fetch_voices(key: &str, cancel: &dyn Fn() -> bool) -> Result<Vec<Voice>, 
 pub fn parse_voices(body: &str) -> Result<Vec<Voice>, String> {
     let v: serde_json::Value = serde_json::from_str(body).map_err(|e| format!("ElevenLabs' voice list couldn't be read: {e}"))?;
     let list = v.get("voices").and_then(|l| l.as_array()).ok_or("ElevenLabs sent no voice list")?;
-    Ok(list
-        .iter()
-        .filter_map(|x| {
-            let id = x.get("voice_id")?.as_str()?.to_string();
-            let name = x.get("name").and_then(|n| n.as_str()).unwrap_or(&id).to_string();
-            let description = x.get("description").and_then(|n| n.as_str()).unwrap_or("").to_string();
-            Some(Voice { id, name, description, designed: false })
-        })
-        .collect())
+    // the account's voices are in it already: no owner to add them from
+    Ok(list.iter().filter_map(crate::voicelib::read_voice).map(|v| Voice { owner: String::new(), ..v }).collect())
 }
 
 fn said(code: u16, body: &str) -> String {
@@ -192,6 +288,7 @@ pub fn design_voice(key: &str, description: &str, name: &str, cancel: &dyn Fn() 
         return Err(said(code, &body));
     }
     let gen = generated_id(&body)?;
+    let design_answer = body.clone();
     let name = if name.trim().is_empty() { short_name(d) } else { name.trim().to_string() };
     let req = serde_json::json!({"voice_name": name, "voice_description": d, "generated_voice_id": gen});
     let (body, code) = post_json(if old { CREATE_URL_OLD } else { CREATE_URL }, key, &req, &dir, cancel)?;
@@ -201,7 +298,9 @@ pub fn design_voice(key: &str, description: &str, name: &str, cancel: &dyn Fn() 
     }
     let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
     let id = v.get("voice_id").and_then(|x| x.as_str()).ok_or("ElevenLabs made the voice but sent no id")?.to_string();
-    Ok(Voice { id, name, description: d.to_string(), designed: true })
+    // its sample came with the design: kept, so it can be heard for free
+    crate::voicelib::keep_design_sample(&id, &design_answer);
+    Ok(Voice { id, name, description: d.to_string(), designed: true, style: "designed".into(), ..Default::default() })
 }
 
 /// The first preview's id in a Voice Design answer.
@@ -446,11 +545,72 @@ pub fn find_speakers(ffmpeg: PathBuf, src: Source, base: PathBuf, key: String, l
     })
 }
 
-/// Send each person's parts with their picked voice; `voices[i]` is person i's voice (None keeps
-/// them as they are).
-pub fn change(ffmpeg: PathBuf, found: Found, voices: Vec<Option<Voice>>, key: String, clean: bool) -> Arc<Mutex<Job>> {
+/// Send each person's parts as their pick says; `picks[i]` is for person i.
+pub fn change(ffmpeg: PathBuf, found: Found, mut picks: Vec<Pick>, key: String, clean: bool, clip_name: String) -> Arc<Mutex<Job>> {
     spawn("Changing voices…", move |st| {
-        let jobs: Vec<(usize, Voice, Vec<(f64, f64)>)> = found.speakers.iter().enumerate().filter_map(|(i, s)| voices.get(i).cloned().flatten().map(|v| (i, v, s.parts.clone()))).flat_map(|(i, v, parts)| pieces(&parts).into_iter().map(move |p| (i, v.clone(), p))).collect();
+        // re-made voices: clone each such person from their own speech first
+        for (i, p) in picks.iter_mut().enumerate() {
+            if *p != Pick::Remake {
+                continue;
+            }
+            let Some(s) = found.speakers.get(i) else { continue };
+            if s.secs() < CLONE_MIN_SECS {
+                return Err(format!("Person {} speaks only {:.0} s: re-making their voice needs at least {CLONE_MIN_SECS:.0} s (a minute or more is best)", i + 1, s.secs()));
+            }
+            set(st, &format!("Learning Person {}'s voice (ElevenLabs)…", i + 1), 0.0);
+            let sample = found.dir.join(format!("person{}-clone.flac", i + 1));
+            let a: Vec<std::ffi::OsString> = vec!["-y".into(), "-v".into(), "error".into(), "-i".into(), found.wav.clone().into(), "-af".into(), only_parts(&s.parts).into(), "-t".into(), format!("{CLONE_MAX_SECS:.0}").into(), "-c:a".into(), "flac".into(), sample.clone().into()];
+            if !ffmpeg_ok(&ffmpeg, &a) {
+                return Err("Couldn't prepare the person's speech".into());
+            }
+            let name = format!("{} Person {}", clip_name.chars().filter(|c| c.is_alphanumeric() || *c == ' ').take(24).collect::<String>().trim(), i + 1);
+            let cancel = || cancelled(st);
+            let (body, code) = curl(&clone_config(&sample, &key, &name), &cancel)?;
+            if code != 200 {
+                return Err(format!("{} (re-making a voice needs a paid ElevenLabs plan with voice cloning)", said(code, &body)));
+            }
+            let j: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let id = j.get("voice_id").and_then(|x| x.as_str()).ok_or("ElevenLabs learned the voice but sent no id")?.to_string();
+            let v = Voice { id, name: name.trim().to_string(), description: format!("Person {}'s own voice, learned from {clip_name}", i + 1), style: "cloned".into(), ..Default::default() };
+            let mut store = Store::load();
+            store.add(v.clone());
+            let _ = store.save();
+            *p = Pick::Voice(v);
+        }
+        // a voice from the shared library joins the account first
+        for p in picks.iter_mut() {
+            let Pick::Voice(v) = p else { continue };
+            if v.owner.is_empty() {
+                continue;
+            }
+            set(st, &format!("Adding “{}” to your ElevenLabs voices…", v.name), 0.0);
+            let old = v.id.clone();
+            let id = crate::voicelib::add_shared(&key, v)?;
+            v.id = id.clone();
+            v.owner.clear();
+            let mut s = Store::load();
+            let fav = s.voices.iter().any(|o| o.id == old && o.favorite);
+            s.voices.retain(|o| o.id != old);
+            s.add(Voice { id: id.clone(), favorite: fav, ..v.clone() });
+            for p in s.picks.values_mut() {
+                if *p == old {
+                    *p = id.clone();
+                }
+            }
+            let _ = s.save();
+        }
+        // (person, voice or None for Voice Isolator, piece)
+        let jobs: Vec<(usize, Option<Voice>, Vec<(f64, f64)>)> = found
+            .speakers
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| match picks.get(i) {
+                Some(Pick::Voice(v)) => Some((i, Some(v.clone()), s.parts.clone())),
+                Some(Pick::Clean) => Some((i, None, s.parts.clone())),
+                _ => None,
+            })
+            .flat_map(|(i, v, parts)| pieces(&parts).into_iter().map(move |p| (i, v.clone(), p)))
+            .collect();
         if jobs.is_empty() {
             return Err("Pick a new voice for at least one person".into());
         }
@@ -459,22 +619,27 @@ pub fn change(ffmpeg: PathBuf, found: Found, voices: Vec<Option<Voice>>, key: St
             if cancelled(st) {
                 return Err("Stopped".into());
             }
-            set(st, &format!("Person {}: {} ({} of {})…", i + 1, v.name, n + 1, jobs.len()), n as f32 / jobs.len() as f32);
+            let vname = v.as_ref().map(|v| v.name.clone()).unwrap_or_else(|| "same voice, cleaner".into());
+            set(st, &format!("Person {}: {vname} ({} of {})…", i + 1, n + 1, jobs.len()), n as f32 / jobs.len() as f32);
             let (from, to) = (piece[0].0, piece.last().unwrap().1);
             let input = found.dir.join(format!("person{}-{n}.flac", i + 1));
             let a: Vec<std::ffi::OsString> = vec!["-y".into(), "-v".into(), "error".into(), "-ss".into(), format!("{from:.3}").into(), "-t".into(), format!("{:.3}", to - from).into(), "-i".into(), found.wav.clone().into(), "-af".into(), keep_only(piece).into(), "-c:a".into(), "flac".into(), input.clone().into()];
             if !ffmpeg_ok(&ffmpeg, &a) {
                 return Err("Couldn't prepare a person's sound".into());
             }
-            let out = found.dir.join(format!("person{}-{}-{n}.mp3", i + 1, safe_id(&v.name).chars().take(20).collect::<String>()));
+            let out = found.dir.join(format!("person{}-{}-{n}.mp3", i + 1, safe_id(&vname).chars().take(20).collect::<String>()));
             let cancel = || cancelled(st);
-            let (_, code) = curl(&sts_config(&input, &out, &key, &v.id, clean), &cancel)?;
+            let config = match v {
+                Some(v) => sts_config(&input, &out, &key, &v.id, clean),
+                None => isolation_config(&input, &out, &key),
+            };
+            let (_, code) = curl(&config, &cancel)?;
             if code != 200 {
                 let body = std::fs::read_to_string(&out).unwrap_or_default();
                 let _ = std::fs::remove_file(&out);
                 return Err(said(code, &body));
             }
-            made.push(Made { speaker: *i, voice: v.name.clone(), at: found.source.start + from, path: out });
+            made.push(Made { speaker: *i, voice: vname, at: found.source.start + from, path: out });
         }
         Ok(Done::Made(made))
     })
@@ -521,11 +686,13 @@ pub struct Panel {
     pub mute_original: bool,
     pub clean: bool,
     pub note: String,
+    /// The voice library window (voicelib.rs).
+    pub library: crate::voicelib::Library,
 }
 
 impl Default for Panel {
     fn default() -> Self {
-        Panel { open: false, job: None, found: None, picks: vec![], store: Store::load(), seen: None, checked: std::time::Instant::now(), describe: String::new(), name: String::new(), mute_original: true, clean: true, note: String::new() }
+        Panel { open: false, job: None, found: None, picks: vec![], store: Store::load(), seen: None, checked: std::time::Instant::now(), describe: String::new(), name: String::new(), mute_original: true, clean: true, note: String::new(), library: Default::default() }
     }
 }
 
@@ -550,7 +717,7 @@ impl Panel {
         self.picks.resize(n, String::new());
         for (k, id) in self.store.picks.clone() {
             if let Ok(i) = k.trim().parse::<usize>() {
-                if i >= 1 && i <= n && self.store.voices.iter().any(|v| v.id == id) {
+                if i >= 1 && i <= n && (id == PICK_CLEAN || id == PICK_REMAKE || self.store.voices.iter().any(|v| v.id == id)) {
                     self.picks[i - 1] = id;
                 }
             }
@@ -594,12 +761,16 @@ impl crate::app::App {
 
     pub fn voice_window(&mut self, ctx: &egui::Context) {
         self.poll_voice(ctx);
+        self.voice_library_window(ctx);
         if !self.voice.open {
             return;
         }
         self.voice.refresh();
         let mut open = true;
         let mut act: Option<&'static str> = None;
+        // a person's ▶ (false = play, true = stop) or ⊞ (browse), with their number
+        let mut person_act: Option<(&'static str, usize)> = None;
+        let playing = self.voice.library.playing.clone();
         let source = self.voice_source();
         let key = self.layouts.eleven_key.trim().to_string();
         let ffmpeg = crate::media::ffmpeg().cloned();
@@ -659,14 +830,32 @@ impl crate::app::App {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(format!("Person {}", i + 1)).strong());
                         ui.label(RichText::new(format!("{:.0} s", s.secs())).color(MUTED).size(11.0));
-                        let shown = v.store.voices.iter().find(|x| x.id == v.picks[i]).map(|x| x.name.clone()).unwrap_or_else(|| "Keep".into());
-                        egui::ComboBox::from_id_salt(("voice-pick", i)).selected_text(shown).width(170.0).show_ui(ui, |ui| {
+                        let me = format!("person:{i}");
+                        let on = playing.as_deref() == Some(me.as_str());
+                        if theme::icon_button_on(ui, true, on, if on { "■" } else { "▶" }, if on { "Stop" } else { "Hear this person in the clip (free)" }).clicked() {
+                            person_act = Some((if on { "stop" } else { "play" }, i));
+                        }
+                        let shown = match v.picks[i].as_str() {
+                            PICK_CLEAN => "Same voice, cleaner".to_string(),
+                            PICK_REMAKE => "Same voice, re-made".to_string(),
+                            id => v.store.voices.iter().find(|x| x.id == id).map(|x| x.name.clone()).unwrap_or_else(|| "Keep".into()),
+                        };
+                        egui::ComboBox::from_id_salt(("voice-pick", i)).selected_text(shown).width(150.0).show_ui(ui, |ui| {
                             ui.selectable_value(&mut v.picks[i], String::new(), "Keep");
+                            ui.label(RichText::new("Enhance").color(MUTED).size(10.5));
+                            ui.selectable_value(&mut v.picks[i], PICK_CLEAN.to_string(), "✨ Same voice, cleaner").on_hover_text("ElevenLabs' Voice Isolator: exactly this person's voice, with noise, echo and music taken away.");
+                            ui.selectable_value(&mut v.picks[i], PICK_REMAKE.to_string(), "✨ Same voice, re-made").on_hover_text("ElevenLabs learns this person's voice from the clip (an instant voice clone), then says every line again with it in studio quality, keeping their timing and way of speaking. Needs a paid ElevenLabs plan and at least 10 s of the person; a minute or more sounds most like them.");
+                            ui.separator();
                             for x in &v.store.voices {
-                                let label = if x.designed { format!("✨ {}", x.name) } else { x.name.clone() };
+                                let star = if x.favorite { "★ " } else if x.designed { "✨ " } else { "" };
+                                let tags: Vec<String> = [&x.gender, &x.age].iter().filter(|t| !t.is_empty()).map(|t| crate::voicelib::pretty(t)).collect();
+                                let label = if tags.is_empty() { format!("{star}{}", x.name) } else { format!("{star}{}  ·  {}", x.name, tags.join(", ")) };
                                 ui.selectable_value(&mut v.picks[i], x.id.clone(), label).on_hover_text(&x.description);
                             }
                         });
+                        if theme::icon_button(ui, "⊞", &format!("Browse voices for Person {}: hear samples, filter by gender, age and style", i + 1)).clicked() {
+                            person_act = Some(("browse", i));
+                        }
                     });
                     ui.label(RichText::new(format!("“{}…”", s.sample)).color(MUTED).size(11.0));
                 }
@@ -686,6 +875,9 @@ impl crate::app::App {
             theme::header(ui, "Voices", "Voices you can pick. Load the ones in your ElevenLabs account, or describe a new one.", |ui| {
                 if theme::icon_button_on(ui, !key.is_empty() && !v.busy(), false, "⬇", "Load my ElevenLabs voices").clicked() {
                     act = Some("load");
+                }
+                if theme::icon_button(ui, "⊞", "Voice library: every voice as a card, with free samples, filters and favourites").clicked() {
+                    act = Some("library");
                 }
             });
             ui.add(egui::TextEdit::multiline(&mut v.describe).desired_rows(2).desired_width(f32::INFINITY).hint_text("Describe a voice: a calm deep male voice, middle-aged, Thai accent, slow and warm"));
@@ -709,7 +901,14 @@ impl crate::app::App {
         if !open {
             self.voice.open = false;
         }
+        match person_act {
+            Some(("browse", i)) => self.open_voice_library(Some(i)),
+            Some(("stop", _)) => self.stop_sample(),
+            Some((_, i)) => self.play_person(i),
+            None => {}
+        }
         match act {
+            Some("library") => self.open_voice_library(None),
             Some("settings") => self.show_settings = true,
             Some("find") => {
                 if let (Some((s, _)), Some(ff)) = (source, ffmpeg) {
@@ -722,9 +921,10 @@ impl crate::app::App {
             }
             Some("change") => {
                 if let (Some(f), Some(ff)) = (self.voice.found.clone(), ffmpeg) {
-                    let voices = self.voice.picks.iter().map(|id| self.voice.store.voices.iter().find(|v| &v.id == id).cloned()).collect();
+                    let picks = self.voice.picks.iter().map(|id| Pick::from_id(id, &self.voice.store)).collect();
+                    let clip = source.as_ref().map(|s| s.1.clone()).unwrap_or_default();
                     self.voice.note.clear();
-                    self.voice.job = Some(change(ff, f, voices, key, self.voice.clean));
+                    self.voice.job = Some(change(ff, f, picks, key, self.voice.clean, clip));
                 }
             }
             Some("design") => {
@@ -839,7 +1039,7 @@ fn tools() -> serde_json::Value {
         },
         {
             "name": "pick_voice",
-            "description": "Pick a voice (by id or name, from list_voices) for a person (1, 2…) in CapCraft's voice changer.",
+            "description": "Pick a voice (by id or name, from list_voices) for a person (1, 2…) in CapCraft's voice changer. Or enhance the person's own voice instead: \"@clean\" (same voice, noise removed) or \"@remake\" (same voice re-made in studio quality from a clone of it).",
             "inputSchema": {"type": "object", "properties": {
                 "person": {"type": "integer", "minimum": 1},
                 "voice": {"type": "string"}
@@ -885,7 +1085,16 @@ fn call_tool(name: &str, args: &serde_json::Value, key: &str) -> Result<String, 
             }
             let mut out = String::from("Voices:\n");
             for v in &st.voices {
-                out += &format!("- {} (id {}){}{}\n", v.name, v.id, if v.designed { ", designed" } else { "" }, if v.description.is_empty() { String::new() } else { format!(": {}", v.description) });
+                let tags: Vec<&str> = [v.gender.as_str(), v.age.as_str(), v.accent.as_str(), v.style.as_str()].into_iter().filter(|t| !t.is_empty()).collect();
+                out += &format!(
+                    "- {} (id {}){}{}{}{}\n",
+                    v.name,
+                    v.id,
+                    if v.designed { ", designed" } else { "" },
+                    if v.favorite { ", favourite" } else { "" },
+                    if tags.is_empty() { String::new() } else { format!(" [{}]", tags.join(", ")) },
+                    if v.description.is_empty() { String::new() } else { format!(": {}", v.description) }
+                );
             }
             if st.voices.is_empty() {
                 out += "(none yet)\n";
@@ -898,7 +1107,13 @@ fn call_tool(name: &str, args: &serde_json::Value, key: &str) -> Result<String, 
         "pick_voice" => {
             let p = person.ok_or("Say which person (1, 2…)")?;
             let mut st = Store::load();
-            let v = st.find(&s("voice")).cloned().ok_or("No voice with that id or name (see list_voices)")?;
+            let want = s("voice");
+            if want == PICK_CLEAN || want == PICK_REMAKE {
+                st.picks.insert(p.to_string(), want.clone());
+                st.save()?;
+                return Ok(format!("Person {p} keeps their own voice, {}.", if want == PICK_CLEAN { "cleaner" } else { "re-made in studio quality" }));
+            }
+            let v = st.find(&want).cloned().ok_or("No voice with that id or name (see list_voices)")?;
             st.picks.insert(p.to_string(), v.id.clone());
             st.save()?;
             Ok(format!("Picked \"{}\" for person {p}.", v.name))
@@ -1009,7 +1224,7 @@ mod tests {
         assert!(c.contains("remove_background_noise=true"));
         assert!(c.contains(r#"output = "C:\\t\\out.mp3""#));
         let v = parse_voices(r#"{"voices":[{"voice_id":"v1","name":"Rachel","description":"calm"},{"name":"no id"}]}"#).unwrap();
-        assert_eq!(v, vec![Voice { id: "v1".into(), name: "Rachel".into(), description: "calm".into(), designed: false }]);
+        assert_eq!(v, vec![Voice { id: "v1".into(), name: "Rachel".into(), description: "calm".into(), ..Default::default() }]);
         assert_eq!(generated_id(r#"{"previews":[{"generated_voice_id":"g1","audio_base_64":"..."}],"text":"x"}"#).unwrap(), "g1");
         assert!(check_description("too short").is_err());
         assert!(check_description("a calm deep voice, slow and warm").is_ok());
@@ -1019,6 +1234,21 @@ mod tests {
         s.add(Voice { id: "d".into(), name: "Mine".into(), designed: true, ..Default::default() });
         assert_eq!(s.voices[0].id, "d", "designed voices first");
         assert_eq!(s.find("mine").map(|v| v.id.as_str()), Some("d"));
+    }
+
+    #[test]
+    fn enhancing_keeps_the_persons_own_voice() {
+        let c = isolation_config(Path::new(r"C:\t\in.flac"), Path::new(r"C:\t\out.mp3"), "k");
+        assert!(c.contains("/v1/audio-isolation") && c.contains("audio=@") && c.contains("output = "), "{c}");
+        let k = clone_config(Path::new(r"C:\t\p.flac"), "k", "My clip; Person 1");
+        assert!(k.contains("/v1/voices/add") && k.contains("files=@") && k.contains("name=My clip Person 1"), "{k}");
+        assert_eq!(only_parts(&[(1.0, 2.5), (4.0, 5.0)]), "aselect='between(t,1.000,2.500)+between(t,4.000,5.000)',asetpts=N/SR/TB");
+        let st = Store { voices: vec![Voice { id: "v1".into(), name: "A".into(), ..Default::default() }], ..Default::default() };
+        assert_eq!(Pick::from_id(PICK_CLEAN, &st), Pick::Clean);
+        assert_eq!(Pick::from_id(PICK_REMAKE, &st), Pick::Remake);
+        assert_eq!(Pick::from_id("", &st), Pick::Keep);
+        assert!(matches!(Pick::from_id("v1", &st), Pick::Voice(_)));
+        assert_eq!(Pick::from_id("gone", &st), Pick::Keep);
     }
 
     #[test]
