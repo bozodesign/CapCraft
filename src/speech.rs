@@ -21,6 +21,8 @@ pub const CAPTION_MAX_BYTES: u32 = 60;
 /// 0x182bff6b0) reports it: 20 % when listening starts, then the recogniser's own percent
 /// (kept to 0..100) × 3/5 + 20, and 80 % once it's ready.
 pub const SPEECH_PROGRESS_START: f32 = 20.0;
+/// 10 % while the sound is being sent (SubmitAsrNode::runStage, videoeditor.dll 0x182c01750).
+pub const SPEECH_PROGRESS_SUBMIT: f32 = 10.0;
 pub const SPEECH_PROGRESS_SHARE: f32 = 3.0 / 5.0;
 pub const SPEECH_PROGRESS_READY: f32 = 80.0;
 

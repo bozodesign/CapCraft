@@ -21,6 +21,12 @@ pub const MODELS: [&str; 2] = ["scribe_v2", "scribe_v1"];
 pub const PAUSE_SPLIT_MS: i64 = 500;
 /// A caption ends after a word ending in one of these.
 pub const SENTENCE_END: [char; 6] = ['.', '!', '?', '。', '！', '？'];
+/// The original asks its recogniser for captions of one line (`max_lines` 1) holding at most
+/// 16 words (`words_per_line`), in the request payload built by videoeditor.dll 0x182c1bbc0
+/// (with `caption_type` 2 and `recognize_type` "subtitle"). Captions from ElevenLabs keep the
+/// same limits: a caption ends at its 16th word, and the byte limit keeps it to one line.
+pub const WORDS_PER_LINE: usize = 16;
+pub const MAX_LINES: usize = 1;
 /// The longest the request may take (seconds).
 pub const MAX_SECS: u32 = 1800;
 
@@ -53,8 +59,8 @@ pub fn words(body: &str) -> Result<Vec<Word>, String> {
 }
 
 /// Captions from the words: a new one starts after a sentence ends, after a pause of
-/// `PAUSE_SPLIT_MS`, or when the next word would make it longer than `max_bytes` (as the local
-/// engine's line limit).
+/// `PAUSE_SPLIT_MS`, once it holds `WORDS_PER_LINE` words, or when the next word would make it
+/// longer than `max_bytes` (`MAX_LINES` line, as the local engine's line limit).
 pub fn sentences(words: &[Word], max_bytes: usize) -> Vec<Sentence> {
     let mut out = vec![];
     let mut cur: Vec<(String, i64, i64)> = vec![];
@@ -79,7 +85,8 @@ pub fn sentences(words: &[Word], max_bytes: usize) -> Vec<Sentence> {
         }
         let ended = cur.iter().rev().find(|p| !p.0.trim().is_empty()).map(|p| p.0.trim_end().ends_with(SENTENCE_END)).unwrap_or(false);
         let paused = last_end.map(|e| w.start - e >= PAUSE_SPLIT_MS).unwrap_or(false);
-        let long = bytes + w.text.len() > max_bytes;
+        let count = cur.iter().filter(|p| !p.0.trim().is_empty()).count();
+        let long = bytes + w.text.len() > max_bytes * MAX_LINES || count >= WORDS_PER_LINE;
         if !cur.is_empty() && (ended || paused || long) {
             flush(&mut cur, &mut out);
             bytes = 0;
@@ -135,7 +142,7 @@ pub fn transcribe(ffmpeg: &Path, wav: &Path, dir: &Path, key: &str, language: &s
     {
         let mut g = st.lock().unwrap_or_else(|e| e.into_inner());
         g.stage = "Listening online (ElevenLabs)…".into();
-        g.progress = crate::speech::SPEECH_PROGRESS_START / 100.0;
+        g.progress = crate::speech::SPEECH_PROGRESS_SUBMIT / 100.0;
     }
     let mut last_err = String::new();
     for model in MODELS {
@@ -228,6 +235,17 @@ mod tests {
         assert_eq!((s[2].start, s[2].text.as_str()), (5.0, "one"));
         // a line limit splits too
         assert_eq!(sentences(&w, 4).len(), 4);
+        // and so does the original's 16 words a line
+        let many: Vec<Word> = (0..40)
+            .flat_map(|i| {
+                [
+                    Word { text: "go".into(), start: i * 100, end: i * 100 + 80, spacing: false },
+                    Word { text: " ".into(), start: i * 100 + 80, end: i * 100 + 100, spacing: true },
+                ]
+            })
+            .collect();
+        let c = sentences(&many, 10_000);
+        assert_eq!(c.iter().map(|s| s.word_texts.len()).collect::<Vec<_>>(), vec![16, 16, 8]);
     }
 
     #[test]
