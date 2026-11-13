@@ -178,6 +178,9 @@ pub struct Voice {
     /// `tone_category_name` (videoeditor.dll from_json 0x180c41e70).
     #[serde(default)]
     pub category: String,
+    /// The voice's own picture in the shared library (`image_url`), when its maker gave one.
+    #[serde(default)]
+    pub image_url: String,
 }
 
 /// voices.json: the voices to choose from, and the voice picked for each person ("1", "2"...)
@@ -224,6 +227,7 @@ impl Store {
                     // the original patches its own language and the list each on its own
                     // (TtsLanguageInfo::patch_from_json 0x180bb70f0): only what the new copy has
                     category: keep(&v.category, &o.category),
+                    image_url: keep(&v.image_url, &o.image_url),
                     language: keep(&v.language, &o.language),
                     languages: keep(&v.languages, &o.languages),
                     preview_url: keep(&v.preview_url, &o.preview_url),

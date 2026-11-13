@@ -25,11 +25,18 @@ pub const ADD_URL: &str = "https://api.elevenlabs.io/v1/voices/add";
 /// Voices fetched per search.
 pub const PAGE_SIZE: usize = 60;
 /// Card width in the grid (points); as many columns as fit.
-pub const CARD_W: f32 = 196.0;
-pub const CARD_H: f32 = 112.0;
+pub const CARD_W: f32 = 230.0;
+pub const CARD_H: f32 = 118.0;
 /// Space between cards, across and down, and inside a card's edge.
-pub const CARD_GAP: f32 = 8.0;
-pub const CARD_PAD: f32 = 9.0;
+pub const CARD_GAP: f32 = 10.0;
+pub const CARD_PAD: f32 = 10.0;
+/// The round picture on a card (its own, or its first letter); clicking it plays the sample.
+pub const AVATAR: f32 = 46.0;
+/// Pictures downloaded at once, and the size they're kept at (pixels).
+pub const IMAGE_JOBS: usize = 4;
+pub const IMAGE_PX: u32 = 96;
+/// The largest picture downloaded (bytes).
+pub const IMAGE_MAX_BYTES: u64 = 5_000_000;
 /// The language label's colour.
 const LANGUAGE_FILL: Color32 = Color32::from_rgb(60, 90, 120);
 /// The longest stretch of a person played with ▶ (seconds).
@@ -48,6 +55,41 @@ pub const STYLES: [(&str, &str); 8] = [
     ("advertisement", "Advertisement"),
     ("informative_educational", "Informative & educational"),
 ];
+/// Accents (ElevenLabs' label, shown): the three heard most first, the rest after a line A–Z.
+/// Accents the loaded voices have that aren't here are added under them.
+pub const ACCENTS: [(&str, &str); 10] = [
+    ("", "Any accent"),
+    ("american", "American"),
+    ("british", "British"),
+    ("australian", "Australian"),
+    ("african", "African"),
+    ("canadian", "Canadian"),
+    ("indian", "Indian"),
+    ("irish", "Irish"),
+    ("scottish", "Scottish"),
+    ("thai", "Thai"),
+];
+/// How many of ACCENTS come before the line (Any, American, British, Australian).
+pub const COMMON_ACCENTS: usize = 4;
+
+/// An accent label as one word ("New Zealand" → "new_zealand"), to compare.
+pub fn accent_key(a: &str) -> String {
+    a.trim().to_lowercase().replace([' ', '-'], "_")
+}
+
+/// The accents to pick from: ACCENTS, then any other accent the voices have, A–Z.
+pub fn accent_choices(voices: &[Voice]) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = ACCENTS.iter().map(|(k, n)| (k.to_string(), n.to_string())).collect();
+    let mut extra: Vec<String> = voices.iter().map(|v| accent_key(&v.accent)).filter(|a| !a.is_empty() && !out.iter().any(|(k, _)| k == a)).collect();
+    extra.sort();
+    extra.dedup();
+    out.extend(extra.into_iter().map(|a| {
+        let n = pretty(&a);
+        (a, n)
+    }));
+    out
+}
+
 /// Languages (ElevenLabs' code, shown): English first and Thai second, the ones used most; the
 /// rest, used now and then, after a line in alphabetical order.
 pub const LANGUAGES: [(&str, &str); 34] = [
@@ -180,6 +222,7 @@ pub fn read_voice(x: &serde_json::Value) -> Option<Voice> {
         owner: text(x, "public_owner_id"),
         favorite: false,
         category: text(x, "category").to_lowercase(),
+        image_url: text(x, "image_url"),
     })
 }
 
@@ -195,9 +238,9 @@ fn enc(s: &str) -> String {
 }
 
 /// The search address for the shared library.
-pub fn shared_url(search: &str, gender: &str, age: &str, style: &str, language: &str) -> String {
+pub fn shared_url(search: &str, gender: &str, age: &str, style: &str, language: &str, accent: &str) -> String {
     let mut u = format!("{SHARED_URL}?page_size={PAGE_SIZE}");
-    for (k, v) in [("search", search.trim()), ("gender", gender), ("age", age), ("use_cases", style), ("language", language)] {
+    for (k, v) in [("search", search.trim()), ("gender", gender), ("age", age), ("use_cases", style), ("language", language), ("accent", accent)] {
         if !v.is_empty() {
             u += &format!("&{k}={}", enc(v));
         }
@@ -205,8 +248,8 @@ pub fn shared_url(search: &str, gender: &str, age: &str, style: &str, language: 
     u
 }
 
-pub fn search_shared(key: &str, search: &str, gender: &str, age: &str, style: &str, language: &str) -> Result<Vec<Voice>, String> {
-    let c = format!("url = {}\n{}{}", quoted(&shared_url(search, gender, age, style, language)), key_header(key), curl_tail());
+pub fn search_shared(key: &str, search: &str, gender: &str, age: &str, style: &str, language: &str, accent: &str) -> Result<Vec<Voice>, String> {
+    let c = format!("url = {}\n{}{}", quoted(&shared_url(search, gender, age, style, language, accent)), key_header(key), curl_tail());
     let (body, code) = curl(&c, &|| false)?;
     if code != 200 {
         return Err(format!("The Voice Library said no ({code}): {}", crate::eleven::message(&body)));
@@ -326,6 +369,54 @@ pub fn load_sample(ffmpeg: &Path, v: &Voice) -> Result<Vec<i16>, String> {
     decode(ffmpeg, &p)
 }
 
+/// Where a voice's picture is kept.
+pub fn image_path(id: &str) -> PathBuf {
+    let safe: String = id.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    crate::projects::settings_dir().join("voice-images").join(format!("{safe}.img"))
+}
+
+/// A voice's picture, downloaded once (no key is sent: it's a public file) and made small.
+pub fn load_image(id: &str, url: &str) -> Result<egui::ColorImage, String> {
+    let p = image_path(id);
+    if !p.is_file() {
+        let url = url.trim();
+        if !url.starts_with("https://") {
+            return Err("no picture".into());
+        }
+        if let Some(d) = p.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        let part = p.with_extension("part");
+        let c = format!("url = {}\noutput = {}\nlocation\nmax-filesize = {IMAGE_MAX_BYTES}\n{}", quoted(url), quoted(&part.display().to_string()), curl_tail());
+        let (_, code) = curl(&c, &|| false)?;
+        if code != 200 {
+            let _ = std::fs::remove_file(&part);
+            return Err(format!("Couldn't get the picture ({code})"));
+        }
+        std::fs::rename(&part, &p).map_err(|e| e.to_string())?;
+    }
+    let bytes = std::fs::read(&p).map_err(|e| e.to_string())?;
+    let img = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
+    let img = img.resize_to_fill(IMAGE_PX, IMAGE_PX, image::imageops::FilterType::Triangle).to_rgba8();
+    Ok(egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw()))
+}
+
+/// A colour of a voice's own for its picture when it has none (the same every time).
+pub fn avatar_fill(id: &str) -> Color32 {
+    const FILLS: [Color32; 8] = [
+        Color32::from_rgb(120, 72, 160),
+        Color32::from_rgb(52, 110, 170),
+        Color32::from_rgb(40, 140, 130),
+        Color32::from_rgb(70, 140, 80),
+        Color32::from_rgb(180, 120, 50),
+        Color32::from_rgb(180, 80, 70),
+        Color32::from_rgb(160, 70, 120),
+        Color32::from_rgb(90, 100, 130),
+    ];
+    let h = id.bytes().fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619));
+    FILLS[(h % FILLS.len() as u32) as usize]
+}
+
 /// A person's own voice from the clip's sound (free: nothing is sent): their first part, at most
 /// `PERSON_SAMPLE_SECS` long.
 pub fn person_sample(wav: &[i16], parts: &[(f64, f64)]) -> Vec<i16> {
@@ -375,7 +466,12 @@ pub struct Library {
     pub style: usize,
     /// Index into LANGUAGES.
     pub language: usize,
+    /// An accent label ("" for any).
+    pub accent: String,
     pub shared: Vec<Voice>,
+    /// Voices' pictures (None: there isn't one or it couldn't be read).
+    images: std::collections::HashMap<String, Option<egui::TextureHandle>>,
+    image_jobs: Vec<(String, Task<egui::ColorImage>)>,
     searched: bool,
     searching: Option<Task<Vec<Voice>>>,
     /// The voice whose sample is loading or playing ("person:n" for a person's own voice).
@@ -386,7 +482,7 @@ pub struct Library {
 
 /// Does a voice pass the filters? (My voices and Favourites are filtered here; the shared
 /// library is filtered by ElevenLabs.)
-pub fn passes(v: &Voice, search: &str, gender: &str, age: &str, style: &str, language: &str) -> bool {
+pub fn passes(v: &Voice, search: &str, gender: &str, age: &str, style: &str, language: &str, accent: &str) -> bool {
     let q = search.trim().to_lowercase();
     let hay = format!("{} {} {} {} {}", v.name, v.description, v.accent, v.style, languages_of(v).join(" ")).to_lowercase();
     (q.is_empty() || q.split_whitespace().all(|w| hay.contains(w)))
@@ -394,6 +490,7 @@ pub fn passes(v: &Voice, search: &str, gender: &str, age: &str, style: &str, lan
         && (age.is_empty() || v.age.eq_ignore_ascii_case(age))
         && (style.is_empty() || v.style.eq_ignore_ascii_case(style) || v.style.to_lowercase().contains(&style.replace('_', " ")))
         && (language.is_empty() || languages_of(v).iter().any(|l| l == language))
+        && (accent.is_empty() || accent_key(&v.accent) == accent_key(accent))
 }
 
 /// How wide `chip` draws a label.
@@ -536,6 +633,22 @@ impl crate::app::App {
         if let Some(n) = lib_note {
             self.voice.library.note = n;
         }
+        // pictures that arrived
+        let l = &mut self.voice.library;
+        if !l.image_jobs.is_empty() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+            let mut i = 0;
+            while i < l.image_jobs.len() {
+                match take(&l.image_jobs[i].1) {
+                    Some(r) => {
+                        let (id, _) = l.image_jobs.remove(i);
+                        let tex = r.ok().map(|img| ctx.load_texture(format!("voice-image-{id}"), img, egui::TextureOptions::LINEAR));
+                        l.images.insert(id, tex);
+                    }
+                    None => i += 1,
+                }
+            }
+        }
         // the ▶ goes back when the sample ends
         if self.voice.library.playing.is_some() && self.voice.library.loading.is_none() {
             if self.sample_playing() {
@@ -603,6 +716,19 @@ impl crate::app::App {
                     }
                 });
                 changed |= before != l.language;
+                // accents: the common ones on top, the rest after a line
+                let accents = accent_choices(&store.voices);
+                let shown = accents.iter().find(|(k, _)| *k == l.accent).map(|(_, n)| n.clone()).unwrap_or_else(|| pretty(&l.accent));
+                let before = l.accent.clone();
+                egui::ComboBox::from_id_salt("vl-accent").selected_text(shown).width(110.0).height(360.0).show_ui(ui, |ui| {
+                    for (i, (k, n)) in accents.iter().enumerate() {
+                        if i == COMMON_ACCENTS {
+                            ui.separator();
+                        }
+                        ui.selectable_value(&mut l.accent, k.clone(), n);
+                    }
+                });
+                changed |= before != l.accent;
                 let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if l.tab == Tab::Shared && (changed || enter) && !key.is_empty() {
                     act = Some(Act::Search);
@@ -632,14 +758,15 @@ impl crate::app::App {
             }
             ui.separator();
             let (g, a, s, lang) = (GENDERS[l.gender].0, AGES[l.age].0, STYLES[l.style].0, LANGUAGES[l.language].0);
+            let acc = l.accent.clone();
             let list: Vec<Voice> = match l.tab {
-                Tab::Mine => store.voices.iter().filter(|v| v.owner.is_empty() && passes(v, &l.search, g, a, s, lang)).cloned().collect(),
-                Tab::Favourites => store.voices.iter().filter(|v| v.favorite && passes(v, &l.search, g, a, s, lang)).cloned().collect(),
+                Tab::Mine => store.voices.iter().filter(|v| v.owner.is_empty() && passes(v, &l.search, g, a, s, lang, &acc)).cloned().collect(),
+                Tab::Favourites => store.voices.iter().filter(|v| v.favorite && passes(v, &l.search, g, a, s, lang, &acc)).cloned().collect(),
                 Tab::Shared => l.shared.clone(),
             };
             let mut list = list;
             sort_voices(&mut list);
-            let filtering = !l.search.trim().is_empty() || l.gender + l.age + l.style + l.language > 0;
+            let filtering = !l.search.trim().is_empty() || l.gender + l.age + l.style + l.language > 0 || !l.accent.is_empty();
             let has_any = match l.tab {
                 Tab::Mine => store.voices.iter().any(|v| v.owner.is_empty()),
                 Tab::Favourites => store.voices.iter().any(|v| v.favorite),
@@ -687,30 +814,67 @@ impl crate::app::App {
                         let stroke = if on || !used.is_empty() {
                             egui::Stroke::new(1.0_f32, theme::ACCENT)
                         } else if hovered {
-                            egui::Stroke::new(1.0_f32, Color32::from_gray(80))
+                            egui::Stroke::new(1.0_f32, Color32::from_gray(78))
                         } else {
-                            egui::Stroke::NONE
+                            egui::Stroke::new(1.0_f32, Color32::from_gray(48))
                         };
-                        ui.painter().rect(cell, 6.0, if hovered { Color32::from_gray(44) } else { BG2 }, stroke, egui::StrokeKind::Inside);
+                        ui.painter().rect(cell, 8.0, if hovered { Color32::from_gray(44) } else { BG2 }, stroke, egui::StrokeKind::Inside);
                         let inner = cell.shrink(CARD_PAD);
-                        let mut cu = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Min)));
+                        let mut cu = ui.new_child(egui::UiBuilder::new().id_salt(("vl-card", &v.id)).max_rect(inner).layout(egui::Layout::top_down(egui::Align::Min)));
                         cu.set_clip_rect(cell.intersect(ui.clip_rect()));
                         let ui = &mut cu;
+                        // every part has its own place on the card, so nothing lands on anything else
+                        let at = |ui: &mut egui::Ui, r: egui::Rect, right: bool, f: &mut dyn FnMut(&mut egui::Ui)| {
+                            let lay = if right { egui::Layout::right_to_left(egui::Align::Center) } else { egui::Layout::left_to_right(egui::Align::Center) };
+                            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(r).layout(lay), |ui| f(ui));
+                        };
+                        // the picture: its own, else its first letter on a colour of its own; a click plays the sample
+                        let pic = egui::Rect::from_min_size(inner.min, egui::vec2(AVATAR, AVATAR));
+                        let can_hear = !v.preview_url.is_empty() || sample_path(&v.id).is_file();
+                        if !v.image_url.is_empty() && !l.images.contains_key(&v.id) && l.image_jobs.len() < IMAGE_JOBS && !l.image_jobs.iter().any(|(i, _)| *i == v.id) {
+                            let (vid, url) = (v.id.clone(), v.image_url.clone());
+                            l.image_jobs.push((vid.clone(), task(move || load_image(&vid, &url))));
+                        }
+                        let pr = ui.interact(pic, ui.id().with("pic"), if can_hear { egui::Sense::click() } else { egui::Sense::hover() });
                         let (title, tagline) = split_name(&v.name);
-                        // name and favourite
-                        ui.allocate_ui_with_layout(egui::vec2(inner.width(), 20.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            let title = if v.designed { format!("✨ {title}") } else { title.to_string() };
-                            let nw = (ui.available_width() - 26.0).max(40.0);
-                            ui.allocate_ui_with_layout(egui::vec2(nw, 20.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                ui.add(egui::Label::new(RichText::new(title).strong().size(13.0)).truncate()).on_hover_text(&v.name);
-                            });
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if theme::icon_button_on(ui, true, fav, if fav { "★" } else { "☆" }, if fav { "Remove from Favourites" } else { "Add to Favourites" }).clicked() {
-                                    act = Some(Act::Favourite(v.clone()));
-                                }
-                            });
+                        match l.images.get(&v.id).and_then(|t| t.as_ref()) {
+                            Some(t) => {
+                                egui::Image::new((t.id(), pic.size())).corner_radius(AVATAR / 2.0).paint_at(ui, pic);
+                            }
+                            None => {
+                                ui.painter().circle_filled(pic.center(), AVATAR / 2.0, avatar_fill(&v.id));
+                                let first: String = title.chars().find(|c| c.is_alphanumeric()).map(|c| c.to_uppercase().collect()).unwrap_or_default();
+                                ui.painter().text(pic.center(), egui::Align2::CENTER_CENTER, first, egui::FontId::proportional(19.0), Color32::WHITE);
+                            }
+                        }
+                        if can_hear && (pr.hovered() || on) {
+                            ui.painter().circle_filled(pic.center(), AVATAR / 2.0, Color32::from_black_alpha(130));
+                            ui.painter().text(pic.center(), egui::Align2::CENTER_CENTER, if on { "■" } else { "▶" }, egui::FontId::proportional(17.0), Color32::WHITE);
+                        } else if can_hear {
+                            // a small ▶ on the picture says it can be heard
+                            let c = pic.right_bottom() - egui::vec2(7.0, 7.0);
+                            ui.painter().circle(c, 8.0, Color32::from_gray(30), egui::Stroke::new(1.0_f32, Color32::from_gray(90)));
+                            ui.painter().text(c + egui::vec2(0.5, 0.0), egui::Align2::CENTER_CENTER, "▶", egui::FontId::proportional(8.0), Color32::WHITE);
+                        }
+                        let tip = if on { "Stop" } else if can_hear { "Hear a sample (free)" } else { "This voice has no sample" };
+                        let pr = if can_hear { pr.on_hover_cursor(egui::CursorIcon::PointingHand) } else { pr };
+                        if pr.on_hover_text(tip).clicked() {
+                            act = Some(if on { Act::Stop } else { Act::Play(v.clone()) });
+                        }
+                        // favourite, top right
+                        let star = egui::Rect::from_min_max(egui::pos2(inner.right() - 28.0, inner.top() - 3.0), egui::pos2(inner.right() + 2.0, inner.top() + 23.0));
+                        at(ui, star, true, &mut |ui| {
+                            if theme::icon_button_on(ui, true, fav, if fav { "★" } else { "☆" }, if fav { "Remove from Favourites" } else { "Add to Favourites" }).clicked() {
+                                act = Some(Act::Favourite(v.clone()));
+                            }
                         });
-                        // what it says about itself: the part of the name after " - ", else its style or description
+                        // name and what it sounds like, beside the picture
+                        let tx = pic.right() + 10.0;
+                        let name_r = egui::Rect::from_min_max(egui::pos2(tx, inner.top() + 2.0), egui::pos2(star.left() - 2.0, inner.top() + 22.0));
+                        at(ui, name_r, false, &mut |ui| {
+                            let t = if v.designed { format!("✨ {title}") } else { title.to_string() };
+                            ui.add(egui::Label::new(RichText::new(t).strong().size(13.5)).truncate()).on_hover_text(&v.name);
+                        });
                         let about = if !tagline.is_empty() {
                             tagline.to_string()
                         } else if !v.style.is_empty() {
@@ -719,14 +883,14 @@ impl crate::app::App {
                             v.description.clone()
                         };
                         let about = if about.is_empty() && v.gender.is_empty() && v.age.is_empty() { "No details yet: load your voices (⬇) again".to_string() } else { about };
-                        ui.allocate_ui_with_layout(egui::vec2(inner.width(), 16.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        let about_r = egui::Rect::from_min_max(egui::pos2(tx, inner.top() + 24.0), egui::pos2(inner.right(), inner.top() + 42.0));
+                        at(ui, about_r, false, &mut |ui| {
                             let r = ui.add(egui::Label::new(RichText::new(&about).color(MUTED).size(11.0)).truncate());
                             if !v.description.is_empty() {
                                 r.on_hover_text(&v.description);
                             }
                         });
-                        ui.add_space(4.0);
-                        // labels on one line: as many as fit, the rest on hover
+                        // labels on one line under the picture: as many as fit, the rest on hover
                         let langs = languages_of(v);
                         let mut chips: Vec<(String, Color32)> = Vec::new();
                         for (t, f) in [(pretty(&v.gender), gender_fill(&v.gender)), (pretty(&v.age), BG3), (pretty(&v.accent), BG3)] {
@@ -740,10 +904,11 @@ impl crate::app::App {
                             let more = if langs.len() > 1 { format!(" +{}", langs.len() - 1) } else { String::new() };
                             chips.push((format!("{}{more}", language_name(&shown)), LANGUAGE_FILL));
                         }
-                        let r = ui.allocate_ui_with_layout(egui::vec2(inner.width(), 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        let chips_r = egui::Rect::from_min_max(egui::pos2(inner.left(), pic.bottom() + 7.0), egui::pos2(inner.right(), pic.bottom() + 25.0));
+                        let mut hidden: Vec<String> = Vec::new();
+                        let cr = ui.allocate_new_ui(egui::UiBuilder::new().max_rect(chips_r).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
                             ui.spacing_mut().item_spacing.x = 4.0;
                             let mut left = ui.available_width();
-                            let mut hidden: Vec<String> = Vec::new();
                             for (t, f) in &chips {
                                 let need = chip_width(ui, t) + 4.0;
                                 if need <= left && hidden.is_empty() {
@@ -753,47 +918,56 @@ impl crate::app::App {
                                     hidden.push(t.clone());
                                 }
                             }
-                            hidden
                         });
                         let mut tip: Vec<String> = Vec::new();
-                        if !r.inner.is_empty() {
-                            tip.push(r.inner.join(" · "));
+                        if !hidden.is_empty() {
+                            tip.push(hidden.join(" · "));
                         }
                         if langs.len() > 1 {
                             tip.push(langs.iter().map(|x| language_name(x)).collect::<Vec<_>>().join(", "));
                         }
                         if !tip.is_empty() {
-                            r.response.on_hover_text(tip.join("\n"));
+                            cr.response.on_hover_text(tip.join("\n"));
                         }
-                        // the actions, always on the card's bottom line
-                        let bottom = egui::Rect::from_min_max(egui::pos2(inner.left(), inner.bottom() - 24.0), inner.max);
-                        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(bottom).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
-                            let can_hear = !v.preview_url.is_empty() || sample_path(&v.id).is_file();
-                            let tip = if on { "Stop" } else if can_hear { "Hear a sample (free)" } else { "This voice has no sample" };
-                            if theme::icon_button_on(ui, can_hear, on, if on { "■" } else { "▶" }, tip).clicked() {
-                                act = Some(if on { Act::Stop } else { Act::Play(v.clone()) });
-                            }
-                            if !used.is_empty() {
-                                ui.label(RichText::new(format!("Person {}", used.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", "))).color(theme::ACCENT).size(10.5));
-                            }
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match l.for_person {
-                                Some(p) => {
-                                    if theme::panel_button(ui, true, "Use", &format!("Use this voice for Person {}", p + 1)).clicked() {
-                                        act = Some(Act::Use(v.clone(), p));
-                                    }
-                                }
-                                None if people > 0 => {
-                                    ui.menu_button(RichText::new("Use for…").size(theme::BUTTON_TEXT_SIZE), |ui| {
-                                        for p in 0..people {
-                                            if ui.button(format!("Person {}", p + 1)).clicked() {
-                                                act = Some(Act::Use(v.clone(), p));
-                                                ui.close_menu();
-                                            }
-                                        }
-                                    });
-                                }
-                                None => {}
+                        // the bottom line: who uses it on the left, one Use on the right
+                        let bottom = egui::Rect::from_min_max(egui::pos2(inner.left(), inner.bottom() - 26.0), inner.max);
+                        let half = bottom.center().x;
+                        if !used.is_empty() {
+                            let who = egui::Rect::from_min_max(bottom.min, egui::pos2(half, bottom.bottom()));
+                            at(ui, who, false, &mut |ui| {
+                                let t = format!("Person {}", used.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", "));
+                                ui.label(RichText::new(t).color(theme::ACCENT).size(11.0));
                             });
+                        }
+                        let use_r = egui::Rect::from_min_max(egui::pos2(half, bottom.top()), bottom.max);
+                        at(ui, use_r, true, &mut |ui| match l.for_person {
+                            Some(p) => {
+                                let mine = used.contains(&(p + 1));
+                                let tip = format!("Use this voice for Person {}", p + 1);
+                                // quiet until the card is pointed at, so a page of cards stays calm
+                                let r = if mine { None } else if hovered { Some(theme::primary_button(ui, "Use", &tip)) } else { Some(theme::panel_button(ui, true, "Use", &tip)) };
+                                if r.is_some_and(|r| r.clicked()) {
+                                    act = Some(Act::Use(v.clone(), p));
+                                }
+                            }
+                            None if people == 1 => {
+                                if !used.contains(&1) && theme::panel_button(ui, true, "Use", "Use this voice for Person 1").clicked() {
+                                    act = Some(Act::Use(v.clone(), 0));
+                                }
+                            }
+                            None if people > 1 => {
+                                ui.menu_button(RichText::new("Use for…").size(theme::BUTTON_TEXT_SIZE), |ui| {
+                                    for p in 0..people {
+                                        if ui.button(format!("Person {}", p + 1)).clicked() {
+                                            act = Some(Act::Use(v.clone(), p));
+                                            ui.close_menu();
+                                        }
+                                    }
+                                })
+                                .response
+                                .on_hover_text("Use this voice for one of the people found");
+                            }
+                            None => {}
                         });
                     }
                     ui.add_space(CARD_GAP - ui.spacing().item_spacing.y);
@@ -845,8 +1019,9 @@ impl crate::app::App {
                 l.searched = true;
                 let (q, g, a, s) = (l.search.clone(), GENDERS[l.gender].0.to_string(), AGES[l.age].0.to_string(), STYLES[l.style].0.to_string());
                 let lang = LANGUAGES[l.language].0.to_string();
+                let acc = l.accent.clone();
                 let k = key.clone();
-                l.searching = Some(task(move || search_shared(&k, &q, &g, &a, &s, &lang)));
+                l.searching = Some(task(move || search_shared(&k, &q, &g, &a, &s, &lang, &acc)));
             }
             None => {}
         }
@@ -868,8 +1043,19 @@ mod tests {
         assert_eq!(shared[0].owner, "o1");
         assert_eq!(pretty(&shared[0].style), "Narrative story");
         assert_eq!(pretty("middle_aged"), "Middle-aged");
-        assert!(passes(&shared[0], "wise brit", "male", "old", "narrative_story", ""));
-        assert!(!passes(&shared[0], "", "female", "", "", ""));
+        assert!(passes(&shared[0], "wise brit", "male", "old", "narrative_story", "", ""));
+        assert!(!passes(&shared[0], "", "female", "", "", "", ""));
+        // accents: compared as one word, any case
+        assert!(passes(&shared[0], "", "", "", "", "", "british"));
+        assert!(!passes(&shared[0], "", "", "", "", "", "american"));
+        assert_eq!(accent_key("New Zealand"), "new_zealand");
+        let extra = Voice { accent: "New Zealand".into(), ..Default::default() };
+        let ch = accent_choices(&[extra, shared[0].clone()]);
+        assert_eq!(ch.len(), ACCENTS.len() + 1);
+        assert_eq!(ch.last().unwrap(), &("new_zealand".to_string(), "New zealand".to_string()));
+        assert_eq!((ACCENTS[1].0, ACCENTS[2].0), ("american", "british"));
+        // a picture's colour is the voice's own, every time
+        assert_eq!(avatar_fill("abc"), avatar_fill("abc"));
         // languages: its own, then the ones ElevenLabs checked; English first and Thai second
         let th: serde_json::Value = serde_json::from_str(r#"{"voice_id":"t1","name":"Nok","language":"th","verified_languages":[{"language":"th"},{"language":"en-US"}]}"#).unwrap();
         let t = read_voice(&th).unwrap();
@@ -881,9 +1067,9 @@ mod tests {
         // voices saved before the split kept everything in one field
         let old = Voice { language: "th,en".into(), ..Default::default() };
         assert_eq!(languages_of(&old), vec!["th", "en"]);
-        assert!(passes(&t, "", "", "", "", "en") && passes(&t, "", "", "", "", "th"));
-        assert!(!passes(&t, "", "", "", "", "ja"));
-        assert!(!passes(&shared[0], "", "", "", "", "en"), "no language known: not shown under a language");
+        assert!(passes(&t, "", "", "", "", "en", "") && passes(&t, "", "", "", "", "th", ""));
+        assert!(!passes(&t, "", "", "", "", "ja", ""));
+        assert!(!passes(&shared[0], "", "", "", "", "en", ""), "no language known: not shown under a language");
         assert_eq!((LANGUAGES[1].0, LANGUAGES[2].0), ("en", "th"));
         assert_eq!(language_name("th"), "Thai");
         // tidy cards: name and what it sounds like apart, voices in name order
@@ -913,7 +1099,7 @@ mod tests {
 
     #[test]
     fn library_search_address_and_samples() {
-        assert_eq!(shared_url(" deep voice ", "male", "", "social_media", "th"), "https://api.elevenlabs.io/v1/shared-voices?page_size=60&search=deep%20voice&gender=male&use_cases=social_media&language=th");
+        assert_eq!(shared_url(" deep voice ", "male", "", "social_media", "th", ""), "https://api.elevenlabs.io/v1/shared-voices?page_size=60&search=deep%20voice&gender=male&use_cases=social_media&language=th");
         assert_eq!(base64("aGVsbG8=").unwrap(), b"hello");
         assert_eq!(base64("aGk").unwrap(), b"hi");
         assert!(base64("a").is_none());

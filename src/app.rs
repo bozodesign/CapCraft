@@ -442,8 +442,8 @@ impl App {
             }
             app.show_settings = std::env::var_os("CUTSTUDIO_SHOT_SETTINGS").is_some();
             app.voice.open = std::env::var_os("CUTSTUDIO_SHOT_VOICE").is_some();
-            if std::env::var_os("CUTSTUDIO_SHOT_LIBRARY").is_some() {
-                app.open_voice_library(None);
+            if let Some(v) = std::env::var_os("CUTSTUDIO_SHOT_LIBRARY") {
+                app.open_voice_library(if v == "person" { Some(0) } else { None });
             }
         }
         app.build_filter_previews(&cc.egui_ctx);
