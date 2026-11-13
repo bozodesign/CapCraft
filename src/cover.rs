@@ -71,10 +71,19 @@ pub const PICTURE_CLIP_US: i64 = 3_000_000;
 #[allow(dead_code)]
 pub const PICTURE_MATERIAL_US: i64 = 30_000_000;
 
-/// A cover's moment as the original stores it: whole microseconds, never before the start.
+/// A cover's moment as the original stores it: whole microseconds.
 pub fn moment(at: f64) -> f64 {
-    (at.max(0.0) * TICKS_PER_SECOND).round() / TICKS_PER_SECOND
+    (at * TICKS_PER_SECOND).round() / TICKS_PER_SECOND
 }
+
+/// Taking the cover's frame (lyra DraftCoverHandler, frame source 0x1822902b0): a moment before
+/// the start is refused ("frame cover requires non-negative frame_time_us"), one frame is asked
+/// for, at the size the video has or 1080 x 1920 when it has none, and the wait gives up after
+/// 120 000 ms ("extract cover frame timeout").
+/// (The same as `export::FALLBACK_SIZE`, which the frame is drawn at when the project has no size.)
+#[allow(dead_code)]
+pub const FRAME_FALLBACK: (usize, usize) = (1080, 1920);
+pub const FRAME_WAIT_MS: u64 = 120_000;
 
 /// The cover kept after a save: its moment snapped (`moment`); a picture with an empty path is
 /// no picture, as the original makes no cover from one (ImageTransToCover 0x1814ab040).
@@ -119,7 +128,7 @@ impl Source {
     pub fn of(c: &ProjectCover) -> Option<Source> {
         match Kind::from_name(&c.kind) {
             Kind::Image | Kind::WebCover => c.picture.clone().filter(|f| !f.as_os_str().is_empty()).map(Source::Picture),
-            Kind::Frame => Some(Source::Frame(moment(c.at))),
+            Kind::Frame => Some(moment(c.at)).filter(|t| *t >= 0.0).map(Source::Frame),
         }
     }
 }
@@ -133,7 +142,8 @@ pub fn make_args(video: &Path, src: &Source, out: &Path) -> Vec<String> {
     let mut a: Vec<String> = vec!["-y".into(), "-v".into(), "error".into()];
     match src {
         Source::Frame(t) => {
-            a.extend(["-ss".into(), format!("{:.3}", t.max(0.0)), "-i".into(), video.display().to_string()]);
+            // to the microsecond, as the original keeps the moment
+            a.extend(["-ss".into(), format!("{:.6}", t.max(0.0)), "-i".into(), video.display().to_string()]);
         }
         Source::Picture(p) => a.extend(["-i".into(), p.display().to_string()]),
     }
@@ -153,12 +163,39 @@ pub fn attach_args(video: &Path, picture: &Path, tmp: &Path) -> Vec<String> {
 }
 
 fn run(args: &[String]) -> Result<(), String> {
+    run_for(args, None)
+}
+
+/// Run FFmpeg; with `wait`, give up (and stop it) when it takes longer.
+fn run_for(args: &[String], wait: Option<std::time::Duration>) -> Result<(), String> {
     let ff = ffmpeg().ok_or("FFmpeg isn't installed, so the cover can't be made.")?;
-    let out = quiet_command(ff).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).output().map_err(|e| format!("Couldn't start FFmpeg: {e}"))?;
-    if out.status.success() {
+    let mut child = quiet_command(ff).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().map_err(|e| format!("Couldn't start FFmpeg: {e}"))?;
+    // read what it says while it runs, so a full pipe can't hold it up
+    let mut err = child.stderr.take();
+    let said = std::thread::spawn(move || {
+        let mut s = String::new();
+        if let Some(e) = err.as_mut() {
+            let _ = std::io::Read::read_to_string(e, &mut s);
+        }
+        s
+    });
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) if wait.is_some_and(|w| start.elapsed() >= w) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("Taking the cover's frame took too long.".into());
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(e) => return Err(format!("FFmpeg stopped: {e}")),
+        }
+    };
+    let e = said.join().unwrap_or_default();
+    if status.success() {
         Ok(())
     } else {
-        let e = String::from_utf8_lossy(&out.stderr);
         Err(format!("FFmpeg stopped: {}", e.lines().last().unwrap_or("unknown error")))
     }
 }
@@ -170,7 +207,7 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 pub fn put_in(video: &Path, src: &Source) -> Result<(), String> {
     let pic = std::env::temp_dir().join(format!("capcraft-cover-{}-{}.jpg", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
     let tmp = video.with_extension("cover-tmp.mp4");
-    let r = run(&make_args(video, src, &pic))
+    let r = run_for(&make_args(video, src, &pic), Some(std::time::Duration::from_millis(FRAME_WAIT_MS)))
         .and_then(|_| run(&attach_args(video, &pic, &tmp)))
         .and_then(|_| std::fs::rename(&tmp, video).map_err(|e| format!("Couldn't replace the video: {e}")));
     let _ = std::fs::remove_file(&pic);
@@ -444,9 +481,13 @@ mod tests {
         assert_eq!((Kind::Image as u32, Kind::Frame as u32, Kind::WebCover as u32), (0, 1, 2));
         assert_eq!(PICTURE_SUB_KIND, 1);
         assert_eq!(PICTURE_CLIP_US * 10, PICTURE_MATERIAL_US);
-        // moments are whole microseconds and never negative
+        // moments are whole microseconds; one before the start gives no cover (0x1822902b0)
         assert_eq!(moment(1.234_567_89), 1.234_568);
-        assert_eq!(moment(-3.0), 0.0);
+        assert_eq!(Source::of(&ProjectCover { kind: "frame".into(), at: -0.5, picture: None }), None);
+        assert_eq!(Source::of(&ProjectCover { kind: "frame".into(), at: -0.000_000_4, picture: None }), Some(Source::Frame(0.0)));
+        // the frame's fallback size and wait, as the original's
+        assert_eq!(FRAME_FALLBACK, crate::export::FALLBACK_SIZE);
+        assert_eq!(FRAME_WAIT_MS, 120_000);
         // an empty picture path is no picture
         let s = settle(ProjectCover { kind: "image".into(), at: 0.000_000_4, picture: Some(std::path::PathBuf::new()) });
         assert_eq!((s.at, s.picture.clone()), (0.0, None));
@@ -461,7 +502,7 @@ mod tests {
         assert!(s.contains("-c copy -disposition:v:1 attached_pic"), "{s}");
         assert!(s.ends_with("v.cover-tmp.mp4"));
         let m = make_args(Path::new("v.mp4"), &Source::Frame(2.5), Path::new("c.jpg")).join(" ");
-        assert!(m.contains("-ss 2.500 -i v.mp4 -frames:v 1"), "{m}");
+        assert!(m.contains("-ss 2.500000 -i v.mp4 -frames:v 1"), "{m}");
         assert!(m.contains("min(1920,iw)"));
         let p = make_args(Path::new("v.mp4"), &Source::Picture("p.png".into()), Path::new("c.jpg")).join(" ");
         assert!(p.contains("-i p.png") && !p.contains("-ss"), "{p}");
