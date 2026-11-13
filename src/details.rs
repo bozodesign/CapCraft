@@ -222,7 +222,7 @@ fn my_looks_ui(ui: &mut egui::Ui, g: &mut crate::model::Grade, looks: &mut Vec<c
             }
             for (i, l) in looks.iter().enumerate() {
                 ui.horizontal(|ui| {
-                    if ui.small_button("✕").on_hover_text("Delete this look").clicked() {
+                    if ui.small_button("✖").on_hover_text("Delete this look").clicked() {
                         remove = Some(i);
                     }
                     if ui.selectable_label(g.my_look == l.name, &l.name).clicked() {
@@ -388,8 +388,7 @@ impl App {
             ui.label(timecode(self.project.duration(), self.project.fps));
             ui.end_row();
         });
-        heading(ui, "Background");
-        ui.label(RichText::new("Fills the space a clip doesn't cover").color(MUTED).size(11.0));
+        heading_hint(ui, "Background", "Fills the space a clip doesn't cover");
         let mut kind = match self.project.background {
             Background::Black => 0,
             Background::Color(_) => 1,
@@ -410,16 +409,14 @@ impl App {
             (2, _) => self.project.background = Background::Blur,
             _ => {}
         }
-        heading(ui, "Tips");
-        for t in [
-            "Import media on the left, then drag it to the timeline.",
-            "Click a clip to edit it here. Drag its edges to trim.",
-            "Click the square between two clips to set a transition.",
-            "Captions tab: type captions or import an SRT file.",
-            "Ctrl+B splits at the playhead. Space plays.",
-        ] {
-            ui.label(RichText::new(format!("• {t}")).color(MUTED).size(11.5));
-        }
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Tips").color(MUTED).size(12.0));
+            hint(
+                ui,
+                "• Import media on the left, then drag it to the timeline.\n• Click a clip to edit it here. Drag its edges to trim.\n• Click the square between two clips to set a transition.\n• Captions tab: type captions or import an SRT file.\n• Ctrl+B splits at the playhead. Space plays.",
+            );
+        });
     }
 
     fn transition_details(&mut self, ui: &mut egui::Ui, id: u64) {
@@ -456,10 +453,10 @@ impl App {
         }
         let kind = *t;
         ui.horizontal(|ui| {
-            if ui.button("Apply to all cuts").clicked() {
+            if icon_button(ui, "📋", "Apply to all cuts").clicked() {
                 apply_all = true;
             }
-            if ui.button("🗑").on_hover_text("Remove").clicked() {
+            if icon_button(ui, "🗑", "Remove").clicked() {
                 remove = true;
             }
         });
@@ -549,13 +546,13 @@ impl App {
             ui.toggle_value(&mut tf.flip_v, "Vertical");
         });
         ui.horizontal(|ui| {
-            if ui.button("Fit").on_hover_text("Reset position, size and rotation").clicked() {
+            if icon_button(ui, "↺", "Fit: reset position, size and rotation").clicked() {
                 tf.x = 0.0;
                 tf.y = 0.0;
                 tf.scale = 1.0;
                 tf.rotation = 0.0;
             }
-            if ui.button("Fill canvas").clicked() {
+            if icon_button(ui, "⛶", "Fill canvas").clicked() {
                 if let Some(m) = c.media.and_then(|m| self.project.media(m)) {
                     if m.width > 0 && m.height > 0 {
                         let ca = self.project.width as f32 / self.project.height as f32;
@@ -584,26 +581,23 @@ impl App {
         heading(ui, "Keyframes");
         let at = c.keyframe_at(t, fps);
         ui.horizontal(|ui| {
-            let label = if at.is_some() { "♦ Remove keyframe" } else { "♦ Add keyframe" };
-            if ui.add_enabled(inside, egui::Button::new(label)).on_hover_text("K").clicked() {
+            let tip = if at.is_some() { "Remove keyframe (K)" } else { "Add keyframe (K)" };
+            if icon_button_on(ui, inside, at.is_some(), "♦", tip).clicked() {
                 self.toggle_keyframe();
             }
-            if !c.keyframes.is_empty() && ui.button("🗑").on_hover_text("Clear all keyframes").clicked() {
+            if !c.keyframes.is_empty() && icon_button(ui, "🗑", "Clear all keyframes").clicked() {
                 if let Some(cm) = self.project.clip_mut(id) {
                     cm.transform = cm.transform_at(t);
                     cm.keyframes.clear();
                 }
             }
-        });
-        ui.label(
-            RichText::new(if c.keyframes.is_empty() {
-                "Add a keyframe, move the playhead, then change a value: the clip moves between them.".to_string()
+            if c.keyframes.is_empty() {
+                hint(ui, "Add a keyframe, move the playhead, then change a value: the clip moves between them.");
             } else {
-                format!("{} keyframes. Changing a value adds or updates one at the playhead.", c.keyframes.len())
-            })
-            .color(MUTED)
-            .size(11.0),
-        );
+                ui.label(RichText::new(format!("{}", c.keyframes.len())).color(MUTED).size(11.0))
+                    .on_hover_text(format!("{} keyframes. Changing a value adds or updates one at the playhead.", c.keyframes.len()));
+            }
+        });
         if c.text.is_none() {
             heading(ui, "Canvas background");
             let mut kind = match self.project.background {
@@ -736,13 +730,12 @@ impl App {
                 ui.label(RichText::new("Unmute the clip to change the points' levels.").color(MUTED).size(11.5));
             }
         }
-        heading(ui, "Fades");
+        heading_hint(ui, "Fades", "Or drag the round handles at the top corners of the clip on the timeline.");
         slider(ui, "Fade in", &mut c.fade_in, 0.0..=fade_limit(dur as f64), 0.0, " s", 1.0);
         slider(ui, "Fade out", &mut c.fade_out, 0.0..=fade_limit(dur as f64), 0.0, " s", 1.0);
-        ui.label(RichText::new("Or drag the round handles at the top corners of the clip on the timeline.").color(MUTED).size(11.5));
         if c.text.is_none() && c.media.is_some() {
             ui.add_space(6.0);
-            if ui.button("♪ Separate sound to its own track").clicked() {
+            if icon_button(ui, "♪", "Separate sound to its own track").clicked() {
                 separate = true;
             }
         }
@@ -786,8 +779,10 @@ impl App {
                 c.duration = c.duration.min(lim);
             }
         }
-        ui.label(RichText::new(format!("Length on the timeline: {:.2} s", c.duration)).color(MUTED));
-        ui.label(RichText::new("Faster clips get shorter, slower ones longer (length = source length / speed). Up to 5x the voice keeps its pitch; above 5x the pitch changes.").color(MUTED).size(11.0));
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("Length on the timeline: {:.2} s", c.duration)).color(MUTED));
+            hint(ui, "Faster clips get shorter, slower ones longer (length = source length / speed). Up to 5x the voice keeps its pitch; above 5x the pitch changes.");
+        });
     }
 
     fn clip_anim_ui(&mut self, ui: &mut egui::Ui, id: u64) {
@@ -934,7 +929,7 @@ impl App {
         let mut ch = ui.data(|d| d.get_temp::<usize>(ch_id)).unwrap_or(0);
         tabs(ui, &mut ch, &["Master", "Red", "Green", "Blue"]);
         ui.data_mut(|d| d.insert_temp(ch_id, ch));
-        ui.label(RichText::new("Click to add a point, drag to move it, double-click (or right-click) a point to take it away.").color(MUTED).size(11.0));
+        hint(ui, "Click to add a point, drag to move it, double-click (or right-click) a point to take it away.");
         let (pts, col) = match ch {
             0 => (&mut g.curves.master, Color32::from_gray(225)),
             1 => (&mut g.curves.red, Color32::from_rgb(240, 80, 80)),
@@ -962,7 +957,7 @@ impl App {
                     c.grade = Grade::default();
                 }
             }
-            if ui.button("Use on every clip").on_hover_text("Give every video and picture clip this same grade").clicked() {
+            if icon_button(ui, "📋", "Use on every clip: give every video and picture clip this same grade").clicked() {
                 for t in &mut self.project.tracks {
                     for c in t.clips.iter_mut().filter(|c| c.text.is_none() && c.media.is_some()) {
                         c.grade = grade.clone();
@@ -1071,11 +1066,11 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.add_sized([86.0, 20.0], egui::Label::new(RichText::new("Type").color(MUTED)));
                     // the original puts a different corner on each type when it is picked
-                    if ui.selectable_label(!s.bg_wrap, "□").on_hover_text("Square: one box round all the text").clicked() && s.bg_wrap {
+                    if ui.selectable_label(!s.bg_wrap, "🔲").on_hover_text("Square: one box round all the text").clicked() && s.bg_wrap {
                         s.bg_wrap = false;
                         s.bg_round = 0.0;
                     }
-                    if ui.selectable_label(s.bg_wrap, "≡").on_hover_text("Wrap: a box hugging each line").clicked() && !s.bg_wrap {
+                    if ui.selectable_label(s.bg_wrap, "☰").on_hover_text("Wrap: a box hugging each line").clicked() && !s.bg_wrap {
                         s.bg_wrap = true;
                         s.bg_round = TEXT_BG_WRAP_ROUND;
                     }

@@ -1755,10 +1755,14 @@ impl App {
             ui.horizontal_centered(|ui| {
                 theme::app_logo(ui);
                 ui.add_space(8.0);
-                if ui.button("‹ Projects").on_hover_text("Save and go back to your projects").clicked() {
+                // the menus look like the other icons here: no box until the pointer is over them
+                let w = &mut ui.visuals_mut().widgets;
+                w.inactive.weak_bg_fill = Color32::TRANSPARENT;
+                w.inactive.bg_stroke = Stroke::NONE;
+                if theme::icon_button(ui, "🏠", "Projects: save and go back to your projects").clicked() {
                     self.go_home();
                 }
-                ui.menu_button("Menu", |ui| {
+                ui.menu_button(egui::RichText::new("☰").size(16.0), |ui| {
                     ui.set_min_width(220.0);
                     if ui.button("New project").clicked() {
                         ui.close_menu();
@@ -1802,13 +1806,15 @@ impl App {
                         ui.close_menu();
                         self.show_settings = true;
                     }
-                });
+                })
+                .response
+                .on_hover_text("Menu");
                 self.layout_menu(ui);
                 ui.add_space(6.0);
-                if ui.add_enabled(self.can_undo(), egui::Button::new("⟲").frame(false)).on_hover_text("Undo (Ctrl+Z)").clicked() {
+                if theme::icon_button_on(ui, self.can_undo(), false, "⟲", "Undo (Ctrl+Z)").clicked() {
                     self.do_undo();
                 }
-                if ui.add_enabled(self.can_redo(), egui::Button::new("⟳").frame(false)).on_hover_text("Redo (Ctrl+Shift+Z)").clicked() {
+                if theme::icon_button_on(ui, self.can_redo(), false, "⟳", "Redo (Ctrl+Shift+Z)").clicked() {
                     self.do_redo();
                 }
                 let avail = ui.available_width();
@@ -1819,11 +1825,10 @@ impl App {
                     theme::window_buttons(ui);
                     ui.add_space(12.0);
                     ui.spacing_mut().item_spacing.x = 8.0;
-                    let b = egui::Button::new(egui::RichText::new("  ⬆  Export  ").color(Color32::WHITE).strong()).fill(ACCENT).corner_radius(6.0);
-                    if ui.add(b).clicked() {
+                    if theme::primary_button(ui, "⬆  Export", "Export the video (Ctrl+E)").clicked() {
                         self.open_export();
                     }
-                    if ui.button("⌨").on_hover_text("Keyboard shortcuts").clicked() {
+                    if theme::icon_button(ui, "⌨", "Keyboard shortcuts").clicked() {
                         self.show_shortcuts = !self.show_shortcuts;
                     }
                     if self.loading > 0 {
@@ -1831,7 +1836,7 @@ impl App {
                         ui.label(egui::RichText::new(format!("Importing {}…", self.loading)).color(MUTED));
                     }
                     if !self.has_ffmpeg {
-                        ui.label(egui::RichText::new("FFmpeg not found: only pictures, colours and text work").color(Color32::from_rgb(240, 170, 80)));
+                        ui.label(egui::RichText::new("⚠ FFmpeg").color(Color32::from_rgb(240, 170, 80))).on_hover_text("FFmpeg not found: only pictures, colours and text work");
                     }
                 });
             });
@@ -1839,7 +1844,7 @@ impl App {
     }
 
     fn layout_menu(&mut self, ui: &mut egui::Ui) {
-        ui.menu_button("Layout", |ui| {
+        ui.menu_button(egui::RichText::new("⊞").size(16.0), |ui| {
             ui.set_min_width(260.0);
             ui.label(egui::RichText::new("Drag a panel by its tab to move it; drag the gaps between panels to resize.").color(MUTED).size(11.5));
             ui.separator();
@@ -1886,7 +1891,9 @@ impl App {
                     ui.close_menu();
                 }
             });
-        });
+        })
+        .response
+        .on_hover_text("Layout: arrange the panels");
     }
 
     pub fn open_export(&mut self) {
@@ -2251,7 +2258,8 @@ impl App {
             let v = vol.unwrap_or(crate::winsound::AppVolume { muted: true, level: 0.0 });
             ui.horizontal_wrapped(|ui| {
                 let why = if v.muted { "muted".to_string() } else { format!("turned down to {:.0} %", v.level * 100.0) };
-                ui.label(egui::RichText::new(format!("🔇 Windows has CapCraft's sound {why} in its Volume Mixer, so playback here is silent (exported videos still have sound).")).color(egui::Color32::from_rgb(255, 120, 120)));
+                ui.label(egui::RichText::new(format!("🔇 Sound {why} in Windows")).color(egui::Color32::from_rgb(255, 120, 120)))
+                    .on_hover_text(format!("Windows has CapCraft's sound {why} in its Volume Mixer, so playback here is silent (exported videos still have sound)."));
                 if ui.button("🔊").on_hover_text("Turn CapCraft's sound on").clicked() {
                     self.check_win_volume_with(Some(&ctx), true);
                 }
@@ -2260,18 +2268,21 @@ impl App {
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let r = self.project.ratio;
-                egui::ComboBox::from_id_salt("ratio").selected_text(format!("Ratio: {}", r.name())).show_ui(ui, |ui| {
-                    for r in Ratio::ALL {
-                        ui.selectable_value(&mut self.project.ratio, r, r.name());
-                    }
-                });
+                egui::ComboBox::from_id_salt("ratio")
+                    .selected_text(format!("▣ {}", r.name()))
+                    .show_ui(ui, |ui| {
+                        for r in Ratio::ALL {
+                            ui.selectable_value(&mut self.project.ratio, r, r.name());
+                        }
+                    })
+                    .response
+                    .on_hover_text("Ratio");
                 let feeds = crate::phone::FEEDS;
                 let cur = self.layouts.phone_overlay.min(feeds.len() - 1);
-                let label = format!("📱 Phone view: {}", feeds[cur].0);
+                let label = format!("📱 {}", feeds[cur].0);
                 let mut open_settings = false;
                 egui::ComboBox::from_id_salt("phone")
                     .selected_text(label)
-                    .width(190.0)
                     .show_ui(ui, |ui| {
                         for (i, (name, tip)) in feeds.iter().enumerate() {
                             ui.selectable_value(&mut self.layouts.phone_overlay, i, *name).on_hover_text(*tip);
@@ -2283,7 +2294,7 @@ impl App {
                         }
                     })
                     .response
-                    .on_hover_text("See how the video will look in a phone app's feed (the buttons and text drawn over it). The video itself doesn't change.");
+                    .on_hover_text("Phone view: see how the video will look in a phone app's feed (the buttons and text drawn over it). The video itself doesn't change.");
                 if open_settings {
                     self.show_settings = true;
                 }

@@ -204,10 +204,117 @@ pub fn apply(ctx: &egui::Context) {
     });
 }
 
+/// Text and icons of a button that can't be used now.
+pub const DISABLED: Color32 = Color32::from_rgb(88, 88, 96);
+
+/// A small icon button for an everyday action: only the icon, a soft square behind it while the
+/// pointer is over it, and its full name on hover.
+pub fn icon_button(ui: &mut egui::Ui, icon: &str, tip: &str) -> egui::Response {
+    icon_button_on(ui, true, false, icon, tip)
+}
+
+/// An icon button that can be greyed out (`enabled` false) or lit (`on`, for a toggle).
+pub fn icon_button_on(ui: &mut egui::Ui, enabled: bool, on: bool, icon: &str, tip: &str) -> egui::Response {
+    let enabled = enabled && ui.is_enabled();
+    let sense = if enabled { egui::Sense::click() } else { egui::Sense::hover() };
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(28.0, 26.0), sense);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, tip));
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter();
+        let hot = enabled && resp.hovered();
+        if on {
+            p.rect_filled(rect, 4.0, ACCENT_DIM);
+        } else if hot {
+            p.rect_filled(rect, 4.0, BG3);
+        }
+        let col = if !enabled { DISABLED } else if hot || on { Color32::WHITE } else { TEXT };
+        p.text(rect.center(), egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(15.0), col);
+    }
+    resp.on_hover_text(tip).on_disabled_hover_text(tip)
+}
+
+/// A panel's own action: a compact button with an icon and a word or two (never a wide bar).
+pub fn panel_button(ui: &mut egui::Ui, enabled: bool, label: &str, tip: &str) -> egui::Response {
+    let b = egui::Button::new(egui::RichText::new(label).size(13.0)).corner_radius(4.0).min_size(egui::vec2(0.0, 26.0));
+    ui.add_enabled(enabled, b).on_hover_text(tip).on_disabled_hover_text(tip)
+}
+
+/// The one main action of the window (Export): compact, in the accent colour.
+pub fn primary_button(ui: &mut egui::Ui, label: &str, tip: &str) -> egui::Response {
+    let b = egui::Button::new(egui::RichText::new(label).color(Color32::WHITE).size(13.0)).fill(ACCENT).corner_radius(4.0).min_size(egui::vec2(0.0, 26.0));
+    ui.add(b).on_hover_text(tip)
+}
+
+/// A panel heading: a small grey title on the left (with more about it on hover when `tip` isn't
+/// empty) and the panel's buttons, added by `actions`, on the right (the first one rightmost).
+pub fn header(ui: &mut egui::Ui, title: &str, tip: &str, actions: impl FnOnce(&mut egui::Ui)) {
+    ui.add_space(2.0);
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(title).color(MUTED).size(12.0));
+        if !tip.is_empty() {
+            hint(ui, tip);
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), actions);
+    });
+}
+
+/// A small grey "ℹ": the explanation shows on hover instead of a paragraph on the panel.
+pub fn hint(ui: &mut egui::Ui, tip: &str) -> egui::Response {
+    ui.label(egui::RichText::new("ℹ").color(MUTED).size(12.0)).on_hover_text(tip)
+}
+
+/// A bold heading with its explanation on hover (a small "ℹ" beside it).
+pub fn heading_hint(ui: &mut egui::Ui, title: &str, tip: &str) {
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(title).strong());
+        hint(ui, tip);
+    });
+}
+
 pub fn c32(c: [u8; 4]) -> Color32 {
     Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3])
 }
 
 pub fn arr(c: Color32) -> [u8; 4] {
     c.to_srgba_unmultiplied()
+}
+
+
+#[cfg(test)]
+mod tests {
+    /// Every symbol the screens show (icons on buttons, marks in labels) is in the app's fonts,
+    /// so none comes out as an empty box.
+    #[test]
+    fn every_icon_can_be_drawn() {
+        let ctx = egui::Context::default();
+        super::apply(&ctx);
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut missing = vec![];
+        for f in std::fs::read_dir(dir).unwrap().flatten() {
+            let text = std::fs::read_to_string(f.path()).unwrap_or_default();
+            for (n, line) in text.lines().enumerate() {
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                // the text between quotes on this line
+                for (i, part) in line.split('"').enumerate() {
+                    if i % 2 == 0 {
+                        continue;
+                    }
+                    for c in part.chars() {
+                        let o = c as u32;
+                        if o < 0x2000 || (0x0E00..=0x0E7F).contains(&o) {
+                            continue;
+                        }
+                        if !ctx.fonts(|fo| fo.has_glyphs(&egui::FontId::proportional(14.0), &c.to_string())) {
+                            missing.push(format!("{c} {}:{}", f.file_name().to_string_lossy(), n + 1));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(missing.is_empty(), "can't be drawn: {missing:?}");
+    }
 }

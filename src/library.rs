@@ -249,10 +249,11 @@ impl App {
     fn mine_tab(&mut self, ui: &mut egui::Ui) {
         use crate::mylib::Cat;
         let ctx = ui.ctx().clone();
-        ui.label(egui::RichText::new("My library").strong().size(14.0));
-        ui.label(egui::RichText::new("Your own intros, outros and music. They're here in every project, so you don't have to look for the files each time.").color(MUTED).size(11.0));
-        ui.add_space(2.0);
-        if ui.add_sized([ui.available_width(), 32.0], egui::Button::new(egui::RichText::new("+  Add files to My library").strong()).fill(ACCENT_DIM)).clicked() {
+        let mut add = false;
+        header(ui, "My library", "Your own intros, outros and music. They're here in every project, so you don't have to look for the files each time.", |ui| {
+            add = panel_button(ui, true, "+  Add", "Add files to My library").clicked();
+        });
+        if add {
             let d = rfd::FileDialog::new()
                 .set_title("Add to My library")
                 .add_filter("Media", &["mp4", "mov", "mkv", "avi", "webm", "m4v", "wmv", "png", "jpg", "jpeg", "webp", "gif", "mp3", "wav", "m4a", "aac", "flac", "ogg", "opus"])
@@ -411,12 +412,14 @@ impl App {
 
     fn media_tab(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        if ui.add_sized([ui.available_width(), 34.0], egui::Button::new(egui::RichText::new("⬇  Import").strong()).fill(ACCENT_DIM)).clicked() {
+        let items: Vec<Media> = self.project.media.iter().filter(|m| m.kind != MediaKind::Color).cloned().collect();
+        let mut import = false;
+        header(ui, &format!("Your media ({})", items.len()), "Videos, pictures and sound. You can also drop files onto the window.", |ui| {
+            import = panel_button(ui, true, "⬇  Import", "Import videos, pictures and sound (Ctrl+I)").clicked();
+        });
+        if import {
             self.pick_and_import(&ctx, false);
         }
-        ui.label(egui::RichText::new("Videos, pictures and sound. You can also drop files onto the window.").color(MUTED).size(11.0));
-        let items: Vec<Media> = self.project.media.iter().filter(|m| m.kind != MediaKind::Color).cloned().collect();
-        Self::section(ui, &format!("Your media ({})", items.len()));
         let (cols, w) = grid_cols(ui, 104.0);
         for row in items.chunks(cols) {
             ui.horizontal(|ui| {
@@ -426,9 +429,9 @@ impl App {
             });
         }
         if items.is_empty() {
-            ui.label(egui::RichText::new("Nothing imported yet").color(MUTED));
+            ui.label(egui::RichText::new("Drop files here").color(MUTED).size(12.0));
         }
-        Self::section(ui, "Library: colour backgrounds");
+        Self::section(ui, "Backgrounds");
         let (cols, w) = grid_cols(ui, 80.0);
         let idx: Vec<usize> = (0..LIBRARY_COLORS.len()).collect();
         for row in idx.chunks(cols) {
@@ -462,11 +465,18 @@ impl App {
 
     fn audio_tab(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        if ui.add_sized([ui.available_width(), 34.0], egui::Button::new(egui::RichText::new("⬇  Import sound").strong()).fill(ACCENT_DIM)).clicked() {
+        let items: Vec<Media> = self.project.media.iter().filter(|m| m.kind == MediaKind::Audio).cloned().collect();
+        let (mut import, mut separate) = (false, false);
+        header(ui, &format!("Sound files ({})", items.len()), "Volume, fades and speed are in the panel on the right.", |ui| {
+            import = panel_button(ui, true, "⬇  Import", "Import sound").clicked();
+            separate = icon_button(ui, "♪", "Separate sound: put the selected video clip's sound on its own track").clicked();
+        });
+        if import {
             self.pick_and_import(&ctx, true);
         }
-        let items: Vec<Media> = self.project.media.iter().filter(|m| m.kind == MediaKind::Audio).cloned().collect();
-        Self::section(ui, &format!("Sound files ({})", items.len()));
+        if separate {
+            self.separate_audio();
+        }
         let (cols, w) = grid_cols(ui, 104.0);
         for row in items.chunks(cols) {
             ui.horizontal(|ui| {
@@ -475,19 +485,17 @@ impl App {
                 }
             });
         }
-        Self::section(ui, "Sound from a video");
-        ui.label(egui::RichText::new("Select a video clip on the timeline and use “Separate sound” to put its sound on its own track. Volume, fades and speed are in the panel on the right.").color(MUTED).size(11.5));
-        if ui.button("♪  Separate sound of the selected clip").clicked() {
-            self.separate_audio();
-        }
     }
 
     fn text_tab(&mut self, ui: &mut egui::Ui) {
-        if ui.add_sized([ui.available_width(), 34.0], egui::Button::new(egui::RichText::new("+  Add default text").strong()).fill(ACCENT_DIM)).clicked() {
+        let mut add = false;
+        header(ui, "Text styles", "Click a style to add it at the playhead, or drag it to the timeline.", |ui| {
+            add = panel_button(ui, true, "+  Text", "Add default text at the playhead").clicked();
+        });
+        if add {
             let t = self.playhead;
             self.add_text_at(text_preset(0), t);
         }
-        Self::section(ui, "Text styles");
         let (cols, w) = grid_cols(ui, 104.0);
         let idx: Vec<usize> = (0..TEXT_PRESETS.len()).collect();
         for row in idx.chunks(cols) {
@@ -525,25 +533,49 @@ impl App {
     }
 
     fn captions_tab(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            if ui.add(egui::Button::new(egui::RichText::new("+  Add caption").strong()).fill(ACCENT_DIM)).on_hover_text("Adds a caption at the playhead").clicked() {
-                self.add_caption_at_playhead();
-            }
-            if ui.button("Import SRT…").clicked() {
-                self.import_srt();
-            }
-            if ui.button("Export SRT…").clicked() {
-                self.export_srt();
-            }
-        });
         let cloud = self.layouts.speech_cloud;
         let ready = if cloud { !self.layouts.eleven_key.trim().is_empty() } else { crate::speech::engine().is_some() && self.speech_model().is_some() };
         let job = self.speech_job.as_ref().map(|j| {
             let g = j.lock().unwrap_or_else(|e| e.into_inner());
             (g.stage.clone(), g.progress)
         });
-        match job {
-            Some((stage, prog)) => {
+        let (mut add, mut import, mut export, mut auto) = (false, false, false, false);
+        ui.horizontal(|ui| {
+            if job.is_none() {
+                let where_ = if cloud { "online by ElevenLabs" } else if self.layouts.speech_gpu { "on this computer (graphics card)" } else { "on this computer (processor)" };
+                let why = if ready {
+                    String::new()
+                } else if cloud {
+                    "\n\nPut your ElevenLabs API key in Settings → Auto captions first.".to_string()
+                } else {
+                    "\n\nThe speech engine or its model isn't installed.".to_string()
+                };
+                let tip = format!("Auto captions: listen to the video's sound and add captions from what's said, heard {where_}. Change this in Settings.{why}");
+                auto = panel_button(ui, ready, "🎤  Auto captions", &tip).clicked();
+                if !ready {
+                    ui.label(egui::RichText::new("⚠").color(Color32::from_rgb(240, 170, 80))).on_hover_text(tip.trim_start());
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                export = icon_button(ui, "⬆", "Export captions (SRT)…").clicked();
+                import = icon_button(ui, "⬇", "Import captions (SRT)…").clicked();
+                add = icon_button(ui, "+", "Add a caption at the playhead").clicked();
+            });
+        });
+        if add {
+            self.add_caption_at_playhead();
+        }
+        if import {
+            self.import_srt();
+        }
+        if export {
+            self.export_srt();
+        }
+        if auto {
+            self.start_auto_captions();
+        }
+        if let Some((stage, prog)) = job {
+            {
                 egui::Frame::new().fill(BG2).corner_radius(6.0).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.add(egui::Spinner::new().size(14.0).color(ACCENT));
@@ -559,21 +591,8 @@ impl App {
                     ui.add(egui::ProgressBar::new(prog).desired_height(6.0).fill(ACCENT));
                 });
             }
-            None => {
-                let b = egui::Button::new(egui::RichText::new("🎤  Auto captions").strong().color(Color32::WHITE)).fill(ACCENT).min_size(Vec2::new(ui.available_width(), 30.0));
-                let where_ = if cloud { "online by ElevenLabs" } else if self.layouts.speech_gpu { "on this computer (graphics card)" } else { "on this computer (processor)" };
-                let r = ui.add_enabled(ready, b).on_hover_text(format!("Listen to the video's sound and add captions from what's said, heard {where_}. Change this in Settings."));
-                if r.clicked() {
-                    self.start_auto_captions();
-                }
-                if !ready {
-                    let why = if cloud { "Put your ElevenLabs API key in Settings → Auto captions." } else { "The speech engine or its model isn't installed." };
-                    ui.label(egui::RichText::new(why).color(Color32::from_rgb(240, 170, 80)).size(11.0));
-                }
-            }
         }
-        ui.checkbox(&mut self.project.captions_share_style, "Style and position apply to all captions");
-        ui.label(egui::RichText::new("Auto captions, type them, or import a subtitle file (.srt). Words keep the times they were said, for word-by-word display.").color(MUTED).size(11.0));
+        ui.checkbox(&mut self.project.captions_share_style, "Same style for all").on_hover_text("Style and position apply to all captions");
         let caps = self.project.captions();
         Self::section(ui, &format!("Captions ({})", caps.len()));
         // find, and find & replace (the original's caption search and its Replace all)
@@ -608,15 +627,17 @@ impl App {
             }
             let n = hits.len();
             ui.label(egui::RichText::new(if q.is_empty() { String::new() } else if n == 0 { "0/0".into() } else { format!("{}/{n}", cur + 1) }).color(MUTED).size(11.0));
-            if ui.add_enabled(n > 0, egui::Button::new("▲").small()).on_hover_text("Previous match").clicked() {
+            if icon_button_on(ui, n > 0, false, "▲", "Previous match").clicked() {
                 cur = (cur + n - 1) % n;
                 jump = Some(cur);
             }
-            if ui.add_enabled(n > 0, egui::Button::new("▼").small()).on_hover_text("Next match").clicked() {
+            if icon_button_on(ui, n > 0, false, "▼", "Next match").clicked() {
                 cur = (cur + 1) % n;
                 jump = Some(cur);
             }
-            ui.toggle_value(&mut replacing, "⇄").on_hover_text("Find and replace");
+            if icon_button_on(ui, true, replacing, "🔁", "Find and replace").clicked() {
+                replacing = !replacing;
+            }
         });
         if replacing {
             ui.horizontal(|ui| {
@@ -628,12 +649,13 @@ impl App {
             });
         }
         ui.horizontal(|ui| {
-            if ui.button("🧹").on_hover_text("Remove filler words (um, uh, เอ่อ, อืม...) from every caption").clicked() {
+            if icon_button(ui, "✨", "Remove filler words (um, uh, เอ่อ, อืม...) from every caption").clicked() {
                 let n = self.project.remove_fillers();
                 self.notify(&if n == 0 { "No filler words found".to_string() } else { format!("Removed {n} filler words") });
             }
-            ui.label(egui::RichText::new("ⓘ").color(MUTED)).on_hover_text(
-                "In the list: Enter splits a caption at the cursor, Shift+Enter starts a new line, Backspace at the start joins it to the one before, Delete at the end joins the next one, ↑ ↓ move between captions.\n\nTranslating, two-language captions and keyword highlight use the original's online service, so they aren't here.",
+            hint(
+                ui,
+                "Auto captions, type them, or import a subtitle file (.srt). Words keep the times they were said, for word-by-word display.\n\nIn the list: Enter splits a caption at the cursor, Shift+Enter starts a new line, Backspace at the start joins it to the one before, Delete at the end joins the next one, ↑ ↓ move between captions.\n\nTranslating, two-language captions and keyword highlight use the original's online service, so they aren't here.",
             );
         });
         let hits_now = hits.clone();
@@ -803,7 +825,7 @@ impl App {
     }
 
     fn effects_tab(&mut self, ui: &mut egui::Ui) {
-        ui.label(egui::RichText::new("Click to apply to the selected clip (or the clip under the playhead), or drag onto a clip.").color(MUTED).size(11.0));
+        header(ui, "Effects", "Click to apply to the selected clip (or the clip under the playhead), or drag onto a clip.", |_| {});
         let (cols, w) = grid_cols(ui, 96.0);
         let t = ui.input(|i| i.time) as f32;
         let current = self.target_visual_clip().and_then(|id| self.project.clip(id)).map(|c| c.effect);
@@ -869,7 +891,7 @@ impl App {
     }
 
     fn transitions_tab(&mut self, ui: &mut egui::Ui) {
-        ui.label(egui::RichText::new("Click to put it on the cut nearest the playhead (or the selected cut), or drag it onto a cut. Default length 0.47 s.").color(MUTED).size(11.0));
+        header(ui, "Transitions", "Click to put it on the cut nearest the playhead (or the selected cut), or drag it onto a cut. Default length 0.47 s.", |_| {});
         let (cols, w) = grid_cols(ui, 96.0);
         let t = ui.input(|i| i.time) as f32;
         let current = match self.selection {
@@ -899,7 +921,7 @@ impl App {
     }
 
     fn filters_tab(&mut self, ui: &mut egui::Ui) {
-        ui.label(egui::RichText::new("Click to apply to the selected clip (or the clip under the playhead). Strength is in the panel on the right.").color(MUTED).size(11.0));
+        header(ui, "Filters", "Click to apply to the selected clip (or the clip under the playhead). Strength is in the panel on the right.", |_| {});
         let (cols, w) = grid_cols(ui, 96.0);
         let current = self.target_visual_clip().and_then(|id| self.project.clip(id)).map(|c| c.filter);
         let idx: Vec<usize> = (0..Filter::ALL.len()).collect();

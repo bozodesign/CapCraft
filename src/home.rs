@@ -241,7 +241,7 @@ impl App {
                         let mr = Rect::from_min_size(pos2(r.right() - 26.0, cover.bottom() + 4.0), vec2(26.0, 22.0));
                         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(mr));
                         let mut close_card_click = false;
-                        child.menu_button(RichText::new("⋯").size(15.0), |ui| {
+                        child.menu_button(RichText::new("…").size(15.0), |ui| {
                             close_card_click = true;
                             ui.set_min_width(150.0);
                             if ui.button("Open").clicked() {
