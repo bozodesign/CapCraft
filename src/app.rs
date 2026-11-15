@@ -2454,10 +2454,21 @@ impl App {
     /// Right-click on the player: save the frame at the playhead as a picture.
     fn player_menu(&mut self, pic: &egui::Response) {
         let empty = self.project.duration() <= 0.0;
+        let exporting = self.export_status.as_ref().is_some_and(|s| {
+            let s = s.lock().unwrap_or_else(|e| e.into_inner());
+            !s.done && s.error.is_none()
+        });
         pic.context_menu(|ui| {
             let busy = self.snapshot.busy();
-            let r = ui.add_enabled(!empty && !busy, egui::Button::new("Save image…"));
-            let r = if empty { r.on_disabled_hover_text("There's nothing in the video yet") } else { r.on_hover_text("Save the frame at the playhead as a picture, at the size an export would have") };
+            let ok = crate::snapshot::allowed(exporting);
+            let r = ui.add_enabled(!empty && !busy && ok, egui::Button::new("Save image…"));
+            let r = if empty {
+                r.on_disabled_hover_text("There's nothing in the video yet")
+            } else if !ok {
+                r.on_disabled_hover_text("Wait for the export to finish")
+            } else {
+                r.on_hover_text("Save the frame at the playhead as a picture, at the size an export would have")
+            };
             if r.clicked() {
                 ui.close_menu();
                 let t = self.playhead;

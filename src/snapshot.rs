@@ -11,6 +11,27 @@ use crate::model::Project;
 /// The picture's shorter side, as an export at 1080p.
 pub const SHORT_SIDE: u32 = 1080;
 
+/// How the original takes the image at a moment (PlayerWin::GetSpecificTimeImage 0x1815e9ef0,
+/// NewVEWrapper::GetSpecificTimeImageSync 0x1816397f0):
+/// - the moment is a whole number of microseconds ("time_in_us");
+/// - the frame is drawn at the size asked for (the canvas is made that big for it, then put
+///   back), never blown up from the preview;
+/// - it waits at most 10 000 ms for the frame;
+/// - the playhead stays where it was;
+/// - no image is taken while an export is running ("compiling now, cannot get display image").
+pub const TICKS_PER_SECOND: f64 = 1_000_000.0;
+pub const WAIT_MS: u64 = 10_000;
+
+/// The moment as the original asks for it: whole microseconds, not before the start.
+pub fn moment(t: f64) -> f64 {
+    (t.max(0.0) * TICKS_PER_SECOND).round() / TICKS_PER_SECOND
+}
+
+/// Whether an image may be taken now: not while an export is running.
+pub fn allowed(exporting: bool) -> bool {
+    !exporting
+}
+
 /// A file name for the frame at `t`: the project's name and the moment, e.g. "My video 00-03-12.png".
 pub fn file_name(project_name: &str, t: f64) -> String {
     let name: String = project_name.chars().filter(|c| !r#"\/:*?"<>|"#.contains(*c)).collect();
@@ -21,8 +42,12 @@ pub fn file_name(project_name: &str, t: f64) -> String {
 
 /// Draw the project at `t` and save it at `path` (PNG, or JPEG for .jpg/.jpeg).
 pub fn save(p: &Project, images: Arc<ImageStore>, t: f64, path: &Path) -> Result<(), String> {
+    let started = std::time::Instant::now();
     let (w, h) = export::output_size(p, SHORT_SIDE);
-    let f = export::still(p, images, t, w.max(h));
+    let f = export::still(p, images, moment(t), w.max(h));
+    if started.elapsed() > std::time::Duration::from_millis(WAIT_MS) {
+        return Err("Taking the frame took too long, so nothing was saved.".into());
+    }
     let mut data = f.data;
     // the video is opaque, so the picture is too
     for px in data.chunks_exact_mut(4) {
@@ -74,6 +99,14 @@ impl Saver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_originals_rules() {
+        assert_eq!(moment(1.234_567_89), 1.234_568);
+        assert_eq!(moment(-1.0), 0.0);
+        assert_eq!(WAIT_MS, 10_000);
+        assert!(allowed(false) && !allowed(true));
+    }
 
     #[test]
     fn frame_file_names() {
