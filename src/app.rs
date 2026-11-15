@@ -1703,20 +1703,21 @@ impl App {
     }
 
     pub fn import_srt(&mut self) {
-        let Some(p) = rfd::FileDialog::new().add_filter("Captions", &["srt"]).pick_file() else { return };
+        let kinds: Vec<&str> = crate::srt::SUBTITLE_KINDS.iter().map(|k| k.0).collect();
+        let Some(p) = rfd::FileDialog::new().add_filter("Captions", &kinds).pick_file() else { return };
         self.import_srt_file(&p, false);
     }
 
-    /// Captions from a subtitle file (.srt) at the times it gives. With `own_track` (a file
-    /// dropped from the computer) they go on a new caption track of their own, so they never
-    /// mix with captions already there. Returns how many were added.
+    /// Captions from a caption file (.srt, .ass, .lrc, .txt) at the times it gives. With
+    /// `own_track` (a file dropped from the computer) they go on a new caption track of their
+    /// own, so they never mix with captions already there. Returns how many were added.
     pub fn import_srt_file(&mut self, p: &std::path::Path, own_track: bool) -> usize {
         let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let Some(text) = crate::srt::read(p) else {
             self.notify(format!("Couldn't read {name}"));
             return 0;
         };
-        let cues = crate::srt::parse(&text);
+        let cues = crate::srt::parse_kind(crate::srt::subtitle_kind(p).unwrap_or(1), &text);
         if cues.is_empty() {
             self.notify(format!("No captions found in {name}"));
             return 0;
@@ -1774,21 +1775,18 @@ impl App {
             }
             return;
         }
-        // the ones that fit one after another make the new track; any overlapping go elsewhere
-        let mut lane: Vec<Clip> = vec![];
-        let mut spill = vec![];
-        for c in clips {
-            if lane.last().map(|l: &Clip| c.start >= l.end() - 1e-6).unwrap_or(true) {
-                lane.push(c);
-            } else {
-                spill.push(c);
+        // each caption on the lowest new track free at its start; overlapping ones get further
+        // new tracks, as the original splits a subtitle file into tracks (FUN_1815bd750)
+        let lane_of = crate::srt::lanes(&clips.iter().map(|c| (c.start, c.end())).collect::<Vec<_>>());
+        let mut lanes: Vec<Vec<Clip>> = vec![];
+        for (c, l) in clips.into_iter().zip(lane_of) {
+            if lanes.len() <= l {
+                lanes.resize_with(l + 1, Vec::new);
             }
+            lanes[l].push(c);
         }
-        if !lane.is_empty() {
+        for lane in lanes.into_iter().filter(|l| !l.is_empty()) {
             self.project.add_track_of(TrackKind::Text, lane);
-        }
-        for c in spill {
-            self.project.place_free(TrackKind::Text, c);
         }
     }
 
@@ -1914,7 +1912,7 @@ impl App {
                         ui.close_menu();
                         self.pick_and_import(ui.ctx(), false);
                     }
-                    if ui.button("Import captions (SRT)…").clicked() {
+                    if ui.button("Import captions (.srt, .ass, .lrc, .txt)…").clicked() {
                         ui.close_menu();
                         self.import_srt();
                     }
