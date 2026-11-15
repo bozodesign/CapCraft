@@ -170,6 +170,9 @@ pub struct App {
     /// My library: the person's own files, shared by all projects.
     pub mylib: Vec<crate::mylib::Item>,
     pub mylib_filter: Option<crate::mylib::Cat>,
+    /// The My library item being renamed (its index), the name being typed, and whether its
+    /// box still has to take the keyboard.
+    pub mylib_renaming: Option<(usize, String, bool)>,
     /// My library files being imported, placed when they arrive.
     pub pending_place: Vec<(String, crate::mylib::Cat)>,
     /// Pictures of My library files, by path (None while loading or when there's none).
@@ -423,6 +426,7 @@ impl App {
             layouts: crate::layout::Layouts::load(),
             mylib: crate::mylib::load(),
             mylib_filter: None,
+            mylib_renaming: None,
             pending_place: vec![],
             mine_thumbs: HashMap::new(),
             show_settings: false,
@@ -690,8 +694,33 @@ impl App {
         }
     }
 
+    /// Give a My library item a new name (the file keeps its own). Media already brought into
+    /// this project from it takes the new name too.
+    pub fn rename_mine(&mut self, i: usize, name: &str) {
+        let Some(it) = self.mylib.get_mut(i) else { return };
+        if !crate::mylib::rename(it, name) {
+            return;
+        }
+        let (path, new) = (it.path.clone(), it.name.clone());
+        crate::mylib::save(&self.mylib);
+        let medias = std::iter::once(&mut self.project.media)
+            .chain(std::iter::once(&mut self.committed.media))
+            .chain(std::iter::once(&mut self.last_frame.media))
+            .chain(self.undo.iter_mut().chain(self.redo.iter_mut()).map(|s| &mut s.media));
+        for list in medias {
+            for m in list.iter_mut().filter(|m| crate::mylib::same_path(&m.path, &path)) {
+                m.name = new.clone();
+            }
+        }
+    }
+
     /// Add media to the project. Media isn't part of undo, so it goes in every snapshot too.
-    fn add_media_record(&mut self, m: Media) {
+    fn add_media_record(&mut self, mut m: Media) {
+        // a My library file keeps the name it was given there, as the original's material
+        // carries its own title (material_name → common_attr.title) apart from its path
+        if let Some(it) = self.mylib.iter().find(|i| crate::mylib::same_path(&i.path, &m.path)) {
+            m.name = it.name.clone();
+        }
         for snap in self.undo.iter_mut().chain(self.redo.iter_mut()) {
             snap.media.push(m.clone());
         }

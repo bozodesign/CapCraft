@@ -324,6 +324,10 @@ impl App {
         let mut remove = None;
         let mut use_it = None;
         let mut drag_it = None;
+        let mut renamed: Option<(usize, String)> = None;
+        let mut rename_start = None;
+        let mut rename_end = false;
+        let renaming = &mut self.mylib_renaming;
         let filter = self.mylib_filter;
         // a grid of cards, like Media
         let shown: Vec<usize> = (0..self.mylib.len()).filter(|&i| filter.is_none_or(|f| f == self.mylib[i].cat)).collect();
@@ -368,11 +372,28 @@ impl App {
                     if !ok {
                         painter.text(img.center(), Align2::CENTER_CENTER, "⚠", FontId::proportional(20.0), Color32::from_rgb(240, 170, 80));
                     }
-                    let mut name = it.name.clone();
-                    if name.chars().count() > 22 {
-                        name = name.chars().take(20).collect::<String>() + "…";
+                    match renaming.as_mut().filter(|r| r.0 == i) {
+                        // typing its new name in place of the name
+                        Some((_, buf, first)) => {
+                            let row = Rect::from_min_max(Pos2::new(rect.min.x + 3.0, rect.max.y - 20.0), Pos2::new(rect.max.x - 3.0, rect.max.y - 2.0));
+                            let te = ui.put(row, egui::TextEdit::singleline(buf).font(FontId::proportional(11.0)).char_limit(crate::mylib::NAME_MAX).hint_text(crate::mylib::file_name(std::path::Path::new(&it.path))));
+                            if *first {
+                                te.request_focus();
+                                *first = false;
+                            } else if ui.input(|inp| inp.key_pressed(egui::Key::Escape)) {
+                                rename_end = true;
+                            } else if te.lost_focus() {
+                                renamed = Some((i, buf.clone()));
+                            }
+                        }
+                        None => {
+                            let mut name = it.name.clone();
+                            if name.chars().count() > 22 {
+                                name = name.chars().take(20).collect::<String>() + "…";
+                            }
+                            painter.text(Pos2::new(rect.min.x + 6.0, rect.max.y - 11.0), Align2::LEFT_CENTER, crate::thai::ui(&name), FontId::proportional(11.0), if ok { TEXT } else { MUTED });
+                        }
                     }
-                    painter.text(Pos2::new(rect.min.x + 6.0, rect.max.y - 11.0), Align2::LEFT_CENTER, crate::thai::ui(&name), FontId::proportional(11.0), if ok { TEXT } else { MUTED });
                     let plus = if ok { Some(plus_badge(ui, img, resp.hovered())) } else { None };
                     if resp.clicked() {
                         if let (Some(pl), true) = (plus, resp.hovered()) {
@@ -400,13 +421,17 @@ impl App {
                                 }
                             }
                         });
+                        if ui.button("✏").on_hover_text("Rename: the name shown here and in your projects (the file on your computer keeps its name)").clicked() {
+                            ui.close_menu();
+                            rename_start = Some(i);
+                        }
                         if ui.button("🗑").on_hover_text("Remove from My library (the file stays on your computer)").clicked() {
                             ui.close_menu();
                             remove = Some(i);
                         }
                     });
                     let tip = if ok {
-                        format!("{}\nDrag it to the timeline, or click + or double-click to use it ({}). Right-click to change its kind or remove it.", it.path, it.cat.use_hint().to_lowercase())
+                        format!("{}\nDrag it to the timeline, or click + or double-click to use it ({}). Right-click to rename it, change its kind or remove it.", it.path, it.cat.use_hint().to_lowercase())
                     } else {
                         format!("{}\nFile not found: it was moved or deleted. Right-click to remove it.", it.path)
                     };
@@ -414,8 +439,19 @@ impl App {
                 }
             });
         }
+        if let Some(i) = rename_start {
+            self.mylib_renaming = Some((i, self.mylib[i].name.clone(), true));
+        }
+        if rename_end {
+            self.mylib_renaming = None;
+        }
+        if let Some((i, name)) = renamed {
+            self.mylib_renaming = None;
+            self.rename_mine(i, &name);
+        }
         if let Some(i) = remove {
             self.mylib.remove(i);
+            self.mylib_renaming = None;
             changed = true;
         }
         if changed {

@@ -89,6 +89,52 @@ pub fn is_media(path: &Path) -> bool {
     MEDIA_EXTS.contains(&ext.as_str())
 }
 
+/// The name a file starts with: its file name. The original keeps a material's name in a
+/// field of its own beside its path (material_name → common_attr.title, field table at
+/// 0x1833567e0), which is what a rename changes.
+pub fn file_name(path: &Path) -> String {
+    path.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string()
+}
+
 pub fn new_item(path: &Path) -> Item {
-    Item { path: path.to_string_lossy().into(), name: path.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string(), cat: guess(path) }
+    Item { path: path.to_string_lossy().into(), name: file_name(path), cat: guess(path) }
+}
+
+/// Longest name kept (characters). Our own choice: the original's limit sits in its closed
+/// interface code.
+pub const NAME_MAX: usize = 80;
+
+/// Give an item a new name in My library. Only the name shown here (and in projects that
+/// use it) changes; the file on the computer keeps its own name and place, as the original
+/// renames a material's title and never the file behind it. Spaces at the ends go; an
+/// empty name brings the file's own name back. Returns whether the name changed.
+pub fn rename(it: &mut Item, name: &str) -> bool {
+    let mut n: String = name.trim().chars().filter(|c| !c.is_control()).take(NAME_MAX).collect();
+    if n.is_empty() {
+        n = file_name(Path::new(&it.path));
+    }
+    if n == it.name {
+        return false;
+    }
+    it.name = n;
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_library_file_can_get_a_new_name_and_its_file_stays() {
+        let mut it = new_item(Path::new("C:/clips/intro_v3.mp4"));
+        assert_eq!(it.name, "intro_v3.mp4");
+        assert!(rename(&mut it, "  Channel intro\n "));
+        assert_eq!(it.name, "Channel intro");
+        assert_eq!(it.path, "C:/clips/intro_v3.mp4");
+        assert!(!rename(&mut it, "Channel intro"));
+        assert!(rename(&mut it, "   "));
+        assert_eq!(it.name, "intro_v3.mp4");
+        rename(&mut it, &"x".repeat(200));
+        assert_eq!(it.name.chars().count(), NAME_MAX);
+    }
 }
