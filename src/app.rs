@@ -1704,25 +1704,44 @@ impl App {
 
     pub fn import_srt(&mut self) {
         let Some(p) = rfd::FileDialog::new().add_filter("Captions", &["srt"]).pick_file() else { return };
-        let Ok(text) = std::fs::read_to_string(&p) else {
-            self.notify("Couldn't read that file");
-            return;
+        self.import_srt_file(&p, false);
+    }
+
+    /// Captions from a subtitle file (.srt) at the times it gives. With `own_track` (a file
+    /// dropped from the computer) they go on a new caption track of their own, so they never
+    /// mix with captions already there. Returns how many were added.
+    pub fn import_srt_file(&mut self, p: &std::path::Path, own_track: bool) -> usize {
+        let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let Some(text) = crate::srt::read(p) else {
+            self.notify(format!("Couldn't read {name}"));
+            return 0;
         };
         let cues = crate::srt::parse(&text);
         if cues.is_empty() {
-            self.notify("No captions found in that file");
-            return;
+            self.notify(format!("No captions found in {name}"));
+            return 0;
         }
         let n = cues.len();
         let share = self.project.captions_share_style;
-        self.add_captions(cues.into_iter().map(|c| (c.start, c.end, c.text, vec![], vec![])).collect(), share);
-        self.notify(format!("{n} captions added"));
+        self.add_captions_to(cues.into_iter().map(|c| (c.start, c.end, c.text, vec![], vec![])).collect(), share, own_track);
+        if own_track {
+            self.notify(format!("{n} captions from {name} added on a new track"));
+        } else {
+            self.notify(format!("{n} captions added"));
+        }
+        n
     }
 
     /// Put captions on the timeline. New ones take the default caption look for the canvas
     /// (FUN_182c15c60), or the first existing caption's look when `reuse_look` is set, as the
     /// original's speech captions do ("reuse style from first seg").
-    fn add_captions(&mut self, mut cues: Vec<(f64, f64, String, Vec<[i32; 2]>, Vec<String>)>, reuse_look: bool) {
+    fn add_captions(&mut self, cues: Vec<(f64, f64, String, Vec<[i32; 2]>, Vec<String>)>, reuse_look: bool) {
+        self.add_captions_to(cues, reuse_look, false);
+    }
+
+    /// `add_captions`, on a new caption track of their own when `own_track` is set (captions
+    /// that overlap each other still spill onto further tracks).
+    fn add_captions_to(&mut self, mut cues: Vec<(f64, f64, String, Vec<[i32; 2]>, Vec<String>)>, reuse_look: bool, own_track: bool) {
         let look = self.project.captions().first().map(|&(ti, ci)| self.project.tracks[ti].clips[ci].clone());
         // every caption at least CAPTION_MIN_SHOWN, whatever made it (the person's rule)
         cues.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -1732,6 +1751,7 @@ impl App {
             c.0 = s;
             c.1 = e;
         }
+        let mut clips = vec![];
         for (start, end, text, times, texts) in cues {
             let id = self.project.new_id();
             let mut clip = Clip::new(id, None, start, end - start);
@@ -1746,7 +1766,29 @@ impl App {
                 clip.transform = o.transform;
             }
             clip.text = Some(st);
-            self.project.place_free(TrackKind::Text, clip);
+            clips.push(clip);
+        }
+        if !own_track {
+            for c in clips {
+                self.project.place_free(TrackKind::Text, c);
+            }
+            return;
+        }
+        // the ones that fit one after another make the new track; any overlapping go elsewhere
+        let mut lane: Vec<Clip> = vec![];
+        let mut spill = vec![];
+        for c in clips {
+            if lane.last().map(|l: &Clip| c.start >= l.end() - 1e-6).unwrap_or(true) {
+                lane.push(c);
+            } else {
+                spill.push(c);
+            }
+        }
+        if !lane.is_empty() {
+            self.project.add_track_of(TrackKind::Text, lane);
+        }
+        for c in spill {
+            self.project.place_free(TrackKind::Text, c);
         }
     }
 
@@ -2747,6 +2789,25 @@ impl eframe::App for App {
 impl App {
     fn editor_ui(&mut self, ctx: &egui::Context) {
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
+        // while subtitle files are dragged over the window, say where they'll go
+        let srt_over = ctx.input(|i| i.raw.hovered_files.iter().any(|f| f.path.as_deref().map(crate::srt::is_subtitle_file).unwrap_or(false)));
+        if srt_over {
+            let r = ctx.screen_rect();
+            let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("srt_drop")));
+            let msg = "Drop to add these captions on a new track";
+            let galley = p.layout_no_wrap(msg.to_string(), FontId::proportional(16.0), Color32::WHITE);
+            let at = Rect::from_center_size(r.center(), galley.size() + Vec2::new(36.0, 22.0));
+            p.rect_filled(at, 10.0, ACCENT.gamma_multiply(0.92));
+            p.galley(at.center() - galley.size() / 2.0, galley, Color32::WHITE);
+        }
+        // subtitle files dropped from the computer go straight onto the timeline, each on a new
+        // caption track; the rest are media
+        let (srts, dropped): (Vec<PathBuf>, Vec<PathBuf>) = dropped.into_iter().partition(|p| crate::srt::is_subtitle_file(p));
+        for p in &srts {
+            if self.import_srt_file(p, true) > 0 {
+                self.tab = LibTab::Captions;
+            }
+        }
         if !dropped.is_empty() {
             // with My library open, files dropped from the computer go into it
             if self.tab == LibTab::Mine {

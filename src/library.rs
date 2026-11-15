@@ -582,7 +582,7 @@ impl App {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 export = icon_button(ui, "⬆", "Export captions (SRT)…").clicked();
-                import = icon_button(ui, "⬇", "Import captions (SRT)…").clicked();
+                import = icon_button(ui, "⬇", "Import captions (SRT)… You can also drag .srt files from your computer onto CapCraft: each goes on a new caption track").clicked();
                 add = icon_button(ui, "+", "Add a caption at the playhead").clicked();
             });
         });
@@ -719,7 +719,7 @@ impl App {
             }
             hint(
                 ui,
-                "Auto captions, type them, or import a subtitle file (.srt). Words keep the times they were said, for word-by-word display.\n\nIn the list: Enter splits a caption at the cursor, Shift+Enter starts a new line, Backspace at the start joins it to the one before, Delete at the end joins the next one, ↑ ↓ move between captions.\n\nTranslating, two-language captions and keyword highlight use the original's online service, so they aren't here.",
+                "Auto captions, type them, or import a subtitle file (.srt), or drag .srt files onto the window (each one gets its own new track). Words keep the times they were said, for word-by-word display.\n\nIn the list: Enter splits a caption at the cursor, Shift+Enter starts a new line, Backspace at the start joins it to the one before, Delete at the end joins the next one, ↑ ↓ move between captions.\n\nTranslating, two-language captions and keyword highlight use the original's online service, so they aren't here.",
             );
         });
         let hits_now = hits.clone();
