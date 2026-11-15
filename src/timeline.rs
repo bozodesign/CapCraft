@@ -800,7 +800,7 @@ impl App {
         let id = self.project.new_id();
         let mut c = Clip::new(id, Some(media_id), t.max(0.0), self.default_len(&m));
         if kind == TrackKind::Overlay {
-            c.transform.scale = 0.5;
+            c.transform.scale = crate::model::OVERLAY_ADD_SCALE;
         }
         insert_on(&mut self.project.tracks[ti], c);
         self.project.relayout();

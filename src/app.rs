@@ -868,7 +868,7 @@ impl App {
             self.project.relayout();
         } else {
             if kind == TrackKind::Overlay {
-                c.transform.scale = 0.5;
+                c.transform.scale = crate::model::OVERLAY_ADD_SCALE;
             }
             self.project.place_free(kind, c);
         }

@@ -8,6 +8,10 @@ pub const CANVAS_W_DEFAULT: u32 = 1920;
 pub const CANVAS_H_DEFAULT: u32 = 1080;
 /// MaterialTransition constructor (videoeditor.dll 0x18091db90) stores 500 ms.
 pub const TRANSITION_DEFAULT: f64 = 0.5;
+/// The size a picture or video starts at when added to an overlay track: full size (fitted
+/// to the canvas like a main-track clip), as in the original's saved projects, where overlay
+/// clips sit at clip.scale 1.0 unless the person resized them (149 of 190).
+pub const OVERLAY_ADD_SCALE: f32 = 1.0;
 /// addVideoTransition (0x182909700): refused when the clip is shorter than twice the transition.
 pub const TRANSITION_MAX_SHARE: f64 = 0.5;
 pub const TEXT_ANIM_LEN: f32 = 0.5;
