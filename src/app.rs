@@ -141,6 +141,7 @@ pub struct App {
     pub cover_thumb: crate::cover::Picture,
     /// The cover button is hovered: the player shows the cover, as the original's does.
     pub cover_peek: bool,
+    pub snapshot: crate::snapshot::Saver,
     pub toast: Option<(String, Instant)>,
     pub project_path: Option<PathBuf>,
     pub show_shortcuts: bool,
@@ -399,6 +400,7 @@ impl App {
             cover_editor: Default::default(),
             cover_thumb: Default::default(),
             cover_peek: false,
+            snapshot: Default::default(),
             toast: None,
             project_path: None,
             show_shortcuts: false,
@@ -2399,7 +2401,8 @@ impl App {
             let name = if self.layouts.channel_name.trim().is_empty() { "yourchannel".to_string() } else { self.layouts.channel_name.trim().trim_start_matches('@').to_string() };
             crate::phone::draw(ui.painter(), ph, feed, self.layouts.safe_area, &crate::phone::Profile { name: &name, avatar });
         }
-        self.gizmo_ui(ui, img_rect, pw);
+        let pic = self.gizmo_ui(ui, img_rect, pw);
+        self.player_menu(&pic);
         if let Some(item) = self.lib_drag.clone() {
             let released = ui.input(|i| i.pointer.any_released());
             let over = ui.input(|i| i.pointer.interact_pos()).map(|p| img_rect.contains(p)).unwrap_or(false);
@@ -2448,7 +2451,31 @@ impl App {
         }
     }
 
-    fn gizmo_ui(&mut self, ui: &mut egui::Ui, img_rect: Rect, pw: usize) {
+    /// Right-click on the player: save the frame at the playhead as a picture.
+    fn player_menu(&mut self, pic: &egui::Response) {
+        let empty = self.project.duration() <= 0.0;
+        pic.context_menu(|ui| {
+            let busy = self.snapshot.busy();
+            let r = ui.add_enabled(!empty && !busy, egui::Button::new("Save image…"));
+            let r = if empty { r.on_disabled_hover_text("There's nothing in the video yet") } else { r.on_hover_text("Save the frame at the playhead as a picture, at the size an export would have") };
+            if r.clicked() {
+                ui.close_menu();
+                let t = self.playhead;
+                let pick = rfd::FileDialog::new()
+                    .set_title("Save image")
+                    .set_file_name(crate::snapshot::file_name(&self.project.name, t))
+                    .add_filter("PNG picture", &["png"])
+                    .add_filter("JPEG picture", &["jpg", "jpeg"])
+                    .save_file();
+                if let Some(path) = pick {
+                    self.snapshot.start(self.project.clone(), self.images.clone(), t, path);
+                    self.notify("Saving the image…");
+                }
+            }
+        });
+    }
+
+    fn gizmo_ui(&mut self, ui: &mut egui::Ui, img_rect: Rect, pw: usize) -> egui::Response {
         let k = img_rect.width() / pw as f32;
         let to_screen = move |x: f32, y: f32| Pos2::new(img_rect.min.x + x * k, img_rect.min.y + y * k);
         let resp = ui.interact(img_rect, ui.id().with("gizmo"), Sense::click_and_drag());
@@ -2555,6 +2582,7 @@ impl App {
                 }
             }
         }
+        resp
     }
 
     pub fn toast_ui(&mut self, ctx: &egui::Context) {
@@ -2717,6 +2745,11 @@ impl App {
             }
         }
         self.cover_thumb.poll(ctx, self.project.cover.as_ref(), &self.project, &self.images, self.revision, crate::cover::THUMB_SIDE, "cover-thumb");
+        if let Some(m) = self.snapshot.poll() {
+            self.notify(m);
+        } else if self.snapshot.busy() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
         self.shortcuts_window(ctx);
         self.settings_window(ctx);
         self.voice_window(ctx);
