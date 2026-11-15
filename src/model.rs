@@ -457,10 +457,11 @@ pub enum FilmLook {
     Noir,
     GoldenHour,
     Moody,
+    Cinema,
 }
 
 impl FilmLook {
-    pub const ALL: [FilmLook; 10] = [
+    pub const ALL: [FilmLook; 11] = [
         FilmLook::None,
         FilmLook::WarmPrint,
         FilmLook::CoolNegative,
@@ -471,6 +472,7 @@ impl FilmLook {
         FilmLook::Noir,
         FilmLook::GoldenHour,
         FilmLook::Moody,
+        FilmLook::Cinema,
     ];
     pub fn name(self) -> &'static str {
         match self {
@@ -484,6 +486,7 @@ impl FilmLook {
             FilmLook::Noir => "Noir",
             FilmLook::GoldenHour => "Golden hour",
             FilmLook::Moody => "Moody green",
+            FilmLook::Cinema => "Cinema film",
         }
     }
     /// The look as grade values (what picking it puts into the controls).
@@ -567,6 +570,17 @@ impl FilmLook {
                 g.saturation = -0.3;
                 g.grain = 0.3;
             }
+            // a 35 mm print: soft film curve, a little warmth in the lights, a glow round
+            // them, and colour grain at the size the original's grain effect starts at
+            FilmLook::Cinema => {
+                g.shadow = at(200.0, 0.12, -0.02);
+                g.highlight = at(40.0, 0.12, 0.0);
+                g.film_curve = 0.45;
+                g.saturation = -0.06;
+                g.halation = 0.2;
+                g.grain = 0.45;
+                g.grain_size = GRAIN_SIZE_DEFAULT;
+            }
         }
         g
     }
@@ -600,6 +614,12 @@ pub struct Grade {
     pub halation: f32,
     /// Film grain, changing 24 times a second.
     pub grain: f32,
+    /// How big the grain is (GRAIN_SIZE_MIN..=1): fine 35 mm grain at the start, coarse
+    /// 16 mm grain at the top.
+    pub grain_size: f32,
+    /// Grain in grey only; off gives colour grain, as film's three dye layers each have
+    /// their own (the original's grain effect starts with monochrome off).
+    pub grain_mono: bool,
     /// The look picked last (its values are in the controls above).
     pub look: FilmLook,
     /// Projects saved before looks filled in the controls added the look on top at this
@@ -621,6 +641,11 @@ pub struct Grade {
 /// (videoeditor.dll 0x1830bed88, compared by is_empty_value_primary_wheel / _log_wheel).
 pub const WHEELS_INTENSITY_DEFAULT: f32 = 1.0;
 
+/// Grain size the original's film grain effect starts at, and the smallest it allows
+/// (LumiGrain Grain.lua: scale 0.3, range 0.22..1).
+pub const GRAIN_SIZE_DEFAULT: f32 = 0.3;
+pub const GRAIN_SIZE_MIN: f32 = 0.22;
+
 impl Default for Grade {
     fn default() -> Self {
         Grade {
@@ -639,6 +664,8 @@ impl Default for Grade {
             bleach: 0.0,
             halation: 0.0,
             grain: 0.0,
+            grain_size: GRAIN_SIZE_DEFAULT,
+            grain_mono: false,
             look: FilmLook::None,
             look_strength: 1.0,
             look_in_controls: false,
@@ -659,6 +686,11 @@ impl Grade {
         a.look_in_controls = false;
         a.amount = 1.0;
         a.my_look = String::new();
+        if a.grain <= 0.0 {
+            // size and colour only matter with some grain
+            a.grain_size = GRAIN_SIZE_DEFAULT;
+            a.grain_mono = false;
+        }
         if a.curves.is_neutral() {
             a.curves = Curves::default();
         }
@@ -740,6 +772,10 @@ impl Grade {
         g.film_curve += o.film_curve * k;
         g.bleach += o.bleach * k;
         g.halation += o.halation * k;
+        if g.grain <= 0.0 && o.grain > 0.0 {
+            g.grain_size = o.grain_size;
+            g.grain_mono = o.grain_mono;
+        }
         g.grain += o.grain * k;
         if g.curves.is_neutral() {
             g.curves = o.curves.clone();

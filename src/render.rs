@@ -401,12 +401,10 @@ pub fn apply_grade(f: &mut Frame, g: &Grade, frame_no: u32, px: f32) {
     });
     let sat = (1.0 + g.saturation).max(0.0);
     let bleach = g.bleach.clamp(0.0, 1.0);
-    let grain = g.grain.clamp(0.0, 1.0) * 38.0;
-    let cell = (px * 1.6).round().max(1.0) as usize;
-    let seed = frame_no.wrapping_mul(0x9E37_79B9);
+    let grain = g.grain.clamp(0.0, 1.0) * GRAIN_STRENGTH;
     let fw = f.w;
+    let fields = (grain > 0.0).then(|| GrainFields::new(fw, f.h, g.grain_size, g.grain_mono, frame_no, px));
     f.data.par_chunks_mut(fw * 4).enumerate().for_each(|(y, row)| {
-        let gy = (y / cell) as u32;
         for x in 0..fw {
             let p = &mut row[x * 4..x * 4 + 4];
             let orig = [p[0] as f32, p[1] as f32, p[2] as f32];
@@ -448,13 +446,13 @@ pub fn apply_grade(f: &mut Frame, g: &Grade, frame_no: u32, px: f32) {
                     c[i] = lookup(&t[i], c[i]);
                 }
             }
-            if grain > 0.0 {
+            if let Some(gf) = &fields {
                 let l = (luma(&c) / 255.0).clamp(0.0, 1.0);
-                let n = grain_noise((x / cell) as u32, gy, seed) - 0.5;
                 // strongest in the mid-tones, like film
-                let k = n * grain * (0.35 + 2.6 * l * (1.0 - l));
-                for v in &mut c {
-                    *v += k;
+                let k = grain * (0.35 + 2.6 * l * (1.0 - l));
+                let n = gf.at(x, y);
+                for i in 0..3 {
+                    c[i] += n[i] * k;
                 }
             }
             for i in 0..3 {
@@ -465,6 +463,79 @@ pub fn apply_grade(f: &mut Frame, g: &Grade, frame_no: u32, px: f32) {
     });
     if g.halation > 0.0 {
         halation(f, (g.halation * amount).min(1.0), px);
+    }
+}
+
+/// How far full grain moves a pixel (0..255 units, before the mid-tone weighting). Our own.
+pub const GRAIN_STRENGTH: f32 = 46.0;
+
+/// Grain size on the Size slider → the size of one grain clump in pixels of a 1080-line
+/// picture: GRAIN_CELL_PX.0 at the smallest size, GRAIN_CELL_PX.1 at the largest. Our own.
+pub const GRAIN_CELL_PX: (f32, f32) = (1.0, 5.0);
+
+/// Share of each colour's own grain in colour grain (the rest is the grain all three share,
+/// so it reads as film's dye clouds rather than coloured specks). Our own.
+pub const GRAIN_COLOR_SHARE: f32 = 0.5;
+
+/// One frame's grain: smooth noise at the clump size plus a finer layer under it, made on a
+/// small grid once and read back smoothly for every pixel, so it looks like soft clumps of
+/// silver, not square pixels. Colour grain adds a field for each of red, green and blue.
+struct GrainFields {
+    coarse: GrainGrid,
+    fine: GrainGrid,
+    colour: Option<[GrainGrid; 3]>,
+}
+
+struct GrainGrid {
+    w: usize,
+    inv: f32,
+    v: Vec<f32>,
+}
+
+impl GrainGrid {
+    fn new(fw: usize, fh: usize, cell: f32, seed: u32) -> Self {
+        let cell = cell.max(1.0);
+        let w = (fw as f32 / cell).ceil() as usize + 2;
+        let h = (fh as f32 / cell).ceil() as usize + 2;
+        let v = (0..w * h).map(|i| grain_noise((i % w) as u32, (i / w) as u32, seed) - 0.5).collect();
+        GrainGrid { w, inv: 1.0 / cell, v }
+    }
+    #[inline]
+    fn at(&self, x: usize, y: usize) -> f32 {
+        let (fx, fy) = (x as f32 * self.inv, y as f32 * self.inv);
+        let (ix, iy) = (fx as usize, fy as usize);
+        let (tx, ty) = (fx - ix as f32, fy - iy as f32);
+        let i = iy * self.w + ix;
+        let (a, b, c, d) = (self.v[i], self.v[i + 1], self.v[i + self.w], self.v[i + self.w + 1]);
+        let top = a + (b - a) * tx;
+        let bottom = c + (d - c) * tx;
+        top + (bottom - top) * ty
+    }
+}
+
+impl GrainFields {
+    fn new(fw: usize, fh: usize, size: f32, mono: bool, frame_no: u32, px: f32) -> Self {
+        let t = ((size - crate::model::GRAIN_SIZE_MIN) / (1.0 - crate::model::GRAIN_SIZE_MIN)).clamp(0.0, 1.0);
+        let cell = px * (GRAIN_CELL_PX.0 + (GRAIN_CELL_PX.1 - GRAIN_CELL_PX.0) * t);
+        let seed = frame_no.wrapping_mul(0x9E37_79B9);
+        GrainFields {
+            coarse: GrainGrid::new(fw, fh, cell, seed),
+            fine: GrainGrid::new(fw, fh, cell * 0.5, seed ^ 0x68E3_1DA4),
+            colour: (!mono).then(|| [0xB529_7A4Du32, 0x1B56_C4E9, 0x7FEB_352D].map(|k| GrainGrid::new(fw, fh, cell, seed ^ k))),
+        }
+    }
+    /// The grain at a pixel for red, green and blue (about -0.5..0.5 each).
+    #[inline]
+    fn at(&self, x: usize, y: usize) -> [f32; 3] {
+        // smooth reading softens the noise; this brings it back to about the same strength
+        let shared = (self.coarse.at(x, y) + self.fine.at(x, y) * 0.5) * 1.4;
+        match &self.colour {
+            None => [shared; 3],
+            Some(c) => {
+                let own = GRAIN_COLOR_SHARE;
+                [0, 1, 2].map(|i| (shared * (1.0 - own) + c[i].at(x, y) * 1.5 * own) * 1.3)
+            }
+        }
     }
 }
 
@@ -1761,6 +1832,38 @@ mod tests {
         old.look = FilmLook::WarmPrint;
         assert!(!old.is_neutral());
         assert_eq!(old.resolved().controls_for_test(), FilmLook::WarmPrint.grade().controls_for_test());
+    }
+
+    #[test]
+    fn film_grain_is_colour_or_grey_soft_and_sized() {
+        let grey = Frame::filled(96, 96, [128, 128, 128, 255]);
+        let mut g = Grade::default();
+        g.grain = 1.0;
+        assert!(!g.is_neutral());
+        let mut colour = grey.clone();
+        apply_grade(&mut colour, &g, 5, 1.0);
+        // colour grain: the channels of a pixel differ somewhere
+        assert!(colour.data.chunks(4).any(|p| p[0] != p[1] || p[1] != p[2]));
+        g.grain_mono = true;
+        let mut mono = grey.clone();
+        apply_grade(&mut mono, &g, 5, 1.0);
+        assert!(mono.data.chunks(4).all(|p| p[0] == p[1] && p[1] == p[2]));
+        assert!(mono.data.chunks(4).any(|p| p[0] != 128));
+        // it moves from frame to frame
+        let mut next = grey.clone();
+        apply_grade(&mut next, &g, 6, 1.0);
+        assert_ne!(mono.data, next.data);
+        // bigger grain: neighbouring pixels are more alike
+        let roughness = |f: &Frame| f.data.chunks(4).collect::<Vec<_>>().windows(2).map(|w| (w[0][0] as f32 - w[1][0] as f32).abs()).sum::<f32>();
+        g.grain_size = 1.0;
+        let mut big = grey.clone();
+        apply_grade(&mut big, &g, 5, 1.0);
+        assert!(roughness(&big) < roughness(&mono) * 0.7, "{} vs {}", roughness(&big), roughness(&mono));
+        // with no grain, its size and colour don't count as a change
+        let mut none = Grade::default();
+        none.grain_size = 0.8;
+        none.grain_mono = true;
+        assert!(none.is_neutral());
     }
 
     #[test]

@@ -1036,6 +1036,12 @@ impl App {
         slider(ui, "Bleach", &mut g.bleach, 0.0..=1.0, 0.0, "", 100.0);
         slider(ui, "Halation", &mut g.halation, 0.0..=1.0, 0.0, "", 100.0);
         slider(ui, "Grain", &mut g.grain, 0.0..=1.0, 0.0, "", 100.0);
+        if g.grain > 0.0 {
+            slider(ui, "Grain size", &mut g.grain_size, crate::model::GRAIN_SIZE_MIN..=1.0, crate::model::GRAIN_SIZE_DEFAULT, "", 100.0);
+            ui.checkbox(&mut g.grain_mono, "Black & white grain").on_hover_text("Off: colour grain, as film's three colour layers each have their own. On: grey grain only");
+        } else {
+            hint(ui, "Grain gives the soft moving texture of cinema film. Or pick the \"Cinema film\" look above.");
+        }
         let grade = g.clone();
         ui.add_space(6.0);
         ui.horizontal(|ui| {
