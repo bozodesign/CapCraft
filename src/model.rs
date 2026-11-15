@@ -9,8 +9,11 @@ pub const CANVAS_H_DEFAULT: u32 = 1080;
 /// MaterialTransition constructor (videoeditor.dll 0x18091db90) stores 500 ms.
 pub const TRANSITION_DEFAULT: f64 = 0.5;
 /// The size a picture or video starts at when added to an overlay track: full size (fitted
-/// to the canvas like a main-track clip), as in the original's saved projects, where overlay
-/// clips sit at clip.scale 1.0 unless the person resized them (149 of 190).
+/// to the canvas like a main-track clip). A new clip's scale starts at x = y = 1.0
+/// (lvve::Scale::Scale 0x1809e5e40), and putting it on an overlay track (FUN_181d85160) or
+/// moving it there from the main track (executeMoveMainToSubVideoAction 0x182074960) leaves
+/// it as it is; the original's saved projects agree (149 of 190 overlay clips at 1.0, the
+/// rest resized by hand).
 pub const OVERLAY_ADD_SCALE: f32 = 1.0;
 /// addVideoTransition (0x182909700): refused when the clip is shorter than twice the transition.
 pub const TRANSITION_MAX_SHARE: f64 = 0.5;
