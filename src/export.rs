@@ -97,6 +97,10 @@ pub fn frame_rate_index(project_fps: f64) -> Option<usize> {
 /// ToVeCompileSetting (videoeditor.dll 0x182cddf70): audio bitrate 192 000 (default),
 /// 256 000 or 320 000 bit/s; sample rate 44 100 Hz unless 48 000 is asked for.
 pub const AUDIO_KBPS: [u32; 3] = [192, 256, 320];
+/// The export dialog starts at 320 kbps sound and Higher quality (the person's choice; the
+/// original starts at 192 kbps and Recommended).
+pub const DEFAULT_AUDIO_KBPS: usize = 2;
+pub const DEFAULT_QUALITY: Quality = Quality::Higher;
 /// ToVeCompileSetting: when the export size is missing it falls back to 1080 x 1920.
 pub const FALLBACK_SIZE: (usize, usize) = (1080, 1920);
 

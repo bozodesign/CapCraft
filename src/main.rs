@@ -3,6 +3,7 @@
 mod app;
 mod audio;
 mod cover;
+mod exportmemo;
 mod snapshot;
 mod decode;
 mod details;
@@ -101,7 +102,9 @@ fn main() -> eframe::Result<()> {
         // no system title bar: the app's own dark top bar moves the window and has its buttons
         .with_decorations(false)
         .with_inner_size([1440.0, 900.0])
-        .with_min_inner_size([960.0, 600.0]);
+        .with_min_inner_size([960.0, 600.0])
+        // files dragged in from the computer (onto the editor or My library)
+        .with_drag_and_drop(true);
     if screenshot.is_some() {
         viewport = viewport.with_active(false);
         #[cfg(windows)]

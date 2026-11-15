@@ -1068,6 +1068,28 @@ impl App {
         }
     }
 
+    /// Add files to My library (from the Add button or dropped on it); ones already there and
+    /// ones that aren't pictures, videos or sound are left out.
+    pub fn add_files_to_mine(&mut self, files: Vec<PathBuf>) {
+        let mut n = 0;
+        let mut skipped = 0;
+        for f in files {
+            let s = f.to_string_lossy().to_string();
+            if !f.is_file() || !crate::mylib::is_media(&f) {
+                skipped += 1;
+            } else if !self.mylib.iter().any(|i| crate::mylib::same_path(&i.path, &s)) {
+                self.mylib.push(crate::mylib::new_item(&f));
+                n += 1;
+            }
+        }
+        crate::mylib::save(&self.mylib);
+        let mut msg = format!("{n} added to My library");
+        if skipped > 0 {
+            msg += &format!(" ({skipped} not a picture, video or sound)");
+        }
+        self.notify(msg);
+    }
+
     pub fn add_to_mine(&mut self, path: &str) {
         if path.is_empty() {
             return;
@@ -1945,8 +1967,14 @@ impl App {
     pub fn open_export(&mut self) {
         if self.export_dialog.is_none() {
             let folder = std::env::var("USERPROFILE").map(|h| PathBuf::from(h).join("Videos")).unwrap_or_else(|_| PathBuf::from("."));
+            // the same project starts from the name (and folder) it was last exported under
+            let last = crate::exportmemo::get(&crate::exportmemo::key(self.project_path.as_deref(), &self.project.name));
+            let (name, folder) = match last {
+                Some(l) => (l.name, if l.folder.is_dir() { l.folder } else { folder }),
+                None => (self.project.name.clone(), folder),
+            };
             let project_fps = export::frame_rate_index(self.project.fps);
-            self.export_dialog = Some(ExportDialog { name: self.project.name.clone(), folder, res: 2, fps: project_fps.unwrap_or(export::FRAME_RATE_FALLBACK), project_fps, quality: export::Quality::Recommended, kbps: export::CUSTOM_KBPS_DEFAULT, constant: false, audio: true, audio_kbps: 0 });
+            self.export_dialog = Some(ExportDialog { name, folder, res: 2, fps: project_fps.unwrap_or(export::FRAME_RATE_FALLBACK), project_fps, quality: export::DEFAULT_QUALITY, kbps: export::CUSTOM_KBPS_DEFAULT, constant: false, audio: true, audio_kbps: export::DEFAULT_AUDIO_KBPS });
         }
     }
 
@@ -2083,6 +2111,7 @@ impl App {
                     name = "video".into();
                 }
                 let path = d.folder.join(format!("{name}.mp4"));
+                crate::exportmemo::remember(&crate::exportmemo::key(self.project_path.as_deref(), &self.project.name), crate::exportmemo::Last { name: name.clone(), folder: d.folder.clone() });
                 start = Some(export::Settings { path, short_side: export::RESOLUTIONS[d.res].1, fps: export::FRAME_RATES[d.fps], quality: d.quality, kbps: d.kbps, constant: d.constant, audio: d.audio, audio_kbps: export::AUDIO_KBPS[d.audio_kbps], cover: self.project.cover.as_ref().and_then(crate::cover::Source::of) });
             }
         });
@@ -2700,7 +2729,12 @@ impl App {
     fn editor_ui(&mut self, ctx: &egui::Context) {
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
         if !dropped.is_empty() {
-            self.import_paths(ctx, dropped, false);
+            // with My library open, files dropped from the computer go into it
+            if self.tab == LibTab::Mine {
+                self.add_files_to_mine(dropped);
+            } else {
+                self.import_paths(ctx, dropped, false);
+            }
         }
 
         // CUTSTUDIO_AUTOPLAY=1: start playing once on open (to measure playback cost)

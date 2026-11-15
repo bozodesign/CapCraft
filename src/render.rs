@@ -1449,7 +1449,8 @@ impl Renderer {
         let mut one_word: Option<TextStyle> = None;
         let mut words = None;
         if s.word_mode != WordMode::All {
-            let spans = typed.spans(c.duration);
+            // every word on screen long enough to read (WORD_MIN_SHOWN_MS)
+            let spans = crate::model::readable(typed.spans(c.duration), c.duration);
             if let Some(i) = word_at(&spans, lt as f64) {
                 let wsp = spans[i];
                 match s.word_mode {

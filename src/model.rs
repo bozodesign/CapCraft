@@ -1092,6 +1092,49 @@ fn share_by_letters(words: Vec<(usize, usize)>, dur: f64) -> Vec<WordSpan> {
     out
 }
 
+/// The shortest time a word stays on screen when captions show word by word (ms): a very short
+/// word said quickly would flash by too fast to read (the person's rule).
+pub const WORD_MIN_SHOWN_MS: i32 = 600;
+
+/// Word times made readable for showing: each word stays at least `WORD_MIN_SHOWN_MS`. A short
+/// word keeps the screen longer and the words after it wait only as much as needed, so the
+/// captions catch up with the speech at the next long word; the last words are kept inside the
+/// clip (`dur` seconds). When the clip is too short for every word to get that long, the words
+/// share it evenly. Only the showing changes; the words' own times stay as heard.
+pub fn readable(mut words: Vec<WordSpan>, dur: f64) -> Vec<WordSpan> {
+    let n = words.len();
+    if n == 0 {
+        return words;
+    }
+    let total = (dur * 1000.0).round() as i32;
+    let min = WORD_MIN_SHOWN_MS;
+    if total < min * n as i32 {
+        for (i, w) in words.iter_mut().enumerate() {
+            w.t0_ms = (total as i64 * i as i64 / n as i64) as i32;
+            w.t1_ms = (total as i64 * (i + 1) as i64 / n as i64) as i32;
+        }
+        return words;
+    }
+    // a word is shown from the end of the one before (the first from the clip's start) to its end
+    let mut end = 0;
+    for w in words.iter_mut() {
+        w.t1_ms = w.t1_ms.max(end + min);
+        end = w.t1_ms;
+    }
+    // and none runs past the clip: from the last back, each leaves room for the ones after it
+    let mut limit = total;
+    for w in words.iter_mut().rev() {
+        w.t1_ms = w.t1_ms.min(limit);
+        limit = w.t1_ms - min;
+    }
+    let mut prev = 0;
+    for w in words.iter_mut() {
+        w.t0_ms = w.t0_ms.clamp(prev, w.t1_ms);
+        prev = w.t1_ms;
+    }
+    words
+}
+
 /// The word being said `t` seconds into the clip (the last one once they're all said).
 pub fn word_at(words: &[WordSpan], t: f64) -> Option<usize> {
     if words.is_empty() {
@@ -2143,6 +2186,30 @@ pub fn short_time(t: f64) -> String {
 #[cfg(test)]
 mod case_tests {
     use super::*;
+
+    #[test]
+    fn short_words_stay_long_enough_to_read() {
+        let w = |t0, t1| WordSpan { start: 0, end: 1, t0_ms: t0, t1_ms: t1 };
+        // "Welcome to my channel. Today": "to" and "my" are said in 180 and 380 ms
+        let heard = vec![w(0, 220), w(220, 400), w(400, 780), w(780, 2070), w(2070, 3550)];
+        let r = readable(heard, 3.55);
+        let shown: Vec<i32> = r.iter().scan(0, |prev, x| {
+            let d = x.t1_ms - *prev;
+            *prev = x.t1_ms;
+            Some(d)
+        }).collect();
+        assert!(shown.iter().all(|&d| d >= WORD_MIN_SHOWN_MS), "{shown:?}");
+        // the short words push the next ones only as much as needed; "channel." catches up
+        assert_eq!(r.iter().map(|x| x.t1_ms).collect::<Vec<_>>(), vec![600, 1200, 1800, 2400, 3550]);
+        // the last words stay inside the clip
+        let r = readable(vec![w(0, 1000), w(1000, 1100), w(1100, 1150)], 1.2);
+        assert_eq!(r.iter().map(|x| x.t1_ms).collect::<Vec<_>>(), vec![400, 800, 1200]);
+        let r = readable(vec![w(0, 2000), w(2000, 2100), w(2100, 2150)], 3.0);
+        assert_eq!(r.iter().map(|x| x.t1_ms).collect::<Vec<_>>(), vec![1800, 2400, 3000]);
+        // long words are left as they were
+        let long = vec![w(0, 900), w(900, 2000)];
+        assert_eq!(readable(long.clone(), 2.0), long);
+    }
 
     #[test]
     fn image_duration_switches_units_like_the_original() {

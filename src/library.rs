@@ -143,10 +143,14 @@ impl App {
                     if resp.clicked() {
                         self.tab = tab;
                     }
+                    if tab == LibTab::Mine {
+                        self.mine_drop_target(ui, r);
+                    }
                 }
             });
         });
-        egui::Frame::new().inner_margin(egui::Margin::same(10)).show(ui, |ui| {
+        let files_over = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
+        let frame = egui::Frame::new().inner_margin(egui::Margin::same(10)).show(ui, |ui| {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match self.tab {
                 LibTab::Media => self.media_tab(ui),
                 LibTab::Mine => self.mine_tab(ui),
@@ -158,6 +162,35 @@ impl App {
                 LibTab::Filters => self.filters_tab(ui),
             });
         });
+        if self.tab == LibTab::Mine {
+            let area = frame.response.rect;
+            self.mine_drop_target(ui, area);
+            // files being dragged in from the computer land in My library while it's open
+            if files_over {
+                let p = ui.painter();
+                p.rect_filled(area.shrink(4.0), 8.0, Color32::from_black_alpha(170));
+                p.rect_stroke(area.shrink(8.0), 8.0, Stroke::new(1.5_f32, ACCENT), egui::StrokeKind::Inside);
+                p.text(area.center(), Align2::CENTER_CENTER, "Drop to add to My library", FontId::proportional(15.0), TEXT);
+                ui.ctx().request_repaint();
+            }
+        }
+    }
+
+    /// A project's media dragged from the Media tab and let go over `r` (the Mine tab, or My
+    /// library itself) is added to My library.
+    fn mine_drop_target(&mut self, ui: &egui::Ui, r: Rect) {
+        let Some(LibItem::Media(id)) = self.lib_drag else { return };
+        let over = ui.ctx().pointer_interact_pos().is_some_and(|p| r.contains(p));
+        if !over {
+            return;
+        }
+        ui.painter().rect_stroke(r.shrink(1.0), 5.0, Stroke::new(1.5_f32, ACCENT), egui::StrokeKind::Inside);
+        if ui.ctx().input(|i| i.pointer.any_released()) {
+            if let Some(path) = self.project.media(id).map(|m| m.path.clone()) {
+                self.add_to_mine(&path);
+            }
+            self.lib_drag = None;
+        }
     }
 
     fn section(ui: &mut egui::Ui, s: &str) {
@@ -256,19 +289,10 @@ impl App {
         if add {
             let d = rfd::FileDialog::new()
                 .set_title("Add to My library")
-                .add_filter("Media", &["mp4", "mov", "mkv", "avi", "webm", "m4v", "wmv", "png", "jpg", "jpeg", "webp", "gif", "mp3", "wav", "m4a", "aac", "flac", "ogg", "opus"])
+                .add_filter("Media", &crate::mylib::MEDIA_EXTS)
                 .add_filter("All files", &["*"]);
             if let Some(files) = d.pick_files() {
-                let mut n = 0;
-                for f in files {
-                    let s = f.to_string_lossy().to_string();
-                    if !self.mylib.iter().any(|i| crate::mylib::same_path(&i.path, &s)) {
-                        self.mylib.push(crate::mylib::new_item(&f));
-                        n += 1;
-                    }
-                }
-                crate::mylib::save(&self.mylib);
-                self.notify(format!("{n} added to My library"));
+                self.add_files_to_mine(files);
             }
         }
         ui.add_space(4.0);
@@ -288,7 +312,7 @@ impl App {
             ui.add_space(20.0);
             ui.vertical_centered(|ui| {
                 ui.label(egui::RichText::new("⭐").size(28.0).color(MUTED));
-                ui.label(egui::RichText::new("Nothing here yet.\nAdd your intro, outro and music files,\nor right-click a file in Media.").color(MUTED));
+                ui.label(egui::RichText::new("Nothing here yet.\nDrop your intro, outro and music files here,\nuse Add, or drag a file from Media onto Mine.").color(MUTED));
             });
             return;
         }

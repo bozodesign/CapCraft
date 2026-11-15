@@ -81,6 +81,14 @@ pub fn guess(path: &Path) -> Cat {
     }
 }
 
+/// The kinds of file My library takes: videos, pictures and sound.
+pub const MEDIA_EXTS: [&str; 19] = ["mp4", "mov", "mkv", "avi", "webm", "m4v", "wmv", "png", "jpg", "jpeg", "webp", "gif", "mp3", "wav", "m4a", "aac", "flac", "ogg", "opus"];
+
+pub fn is_media(path: &Path) -> bool {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    MEDIA_EXTS.contains(&ext.as_str())
+}
+
 pub fn new_item(path: &Path) -> Item {
     Item { path: path.to_string_lossy().into(), name: path.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string(), cat: guess(path) }
 }
