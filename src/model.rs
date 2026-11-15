@@ -646,6 +646,11 @@ pub const WHEELS_INTENSITY_DEFAULT: f32 = 1.0;
 pub const GRAIN_SIZE_DEFAULT: f32 = 0.3;
 pub const GRAIN_SIZE_MIN: f32 = 0.22;
 
+/// The strength an effect starts at when it is added: the effect's "value" field
+/// defaults to 0.5 (videoeditor.dll field table 0x1833459c0, read by the MaterialEffect
+/// constructor 0x1807e02a0). CapCraft's "Add grain" button turns grain on at this amount.
+pub const EFFECT_VALUE_DEFAULT: f32 = 0.5;
+
 impl Default for Grade {
     fn default() -> Self {
         Grade {

@@ -1040,7 +1040,14 @@ impl App {
             slider(ui, "Grain size", &mut g.grain_size, crate::model::GRAIN_SIZE_MIN..=1.0, crate::model::GRAIN_SIZE_DEFAULT, "", 100.0);
             ui.checkbox(&mut g.grain_mono, "Black & white grain").on_hover_text("Off: colour grain, as film's three colour layers each have their own. On: grey grain only");
         } else {
-            hint(ui, "Grain gives the soft moving texture of cinema film. Or pick the \"Cinema film\" look above.");
+            ui.horizontal(|ui| {
+                if icon_button(ui, "✨", "Add grain: the soft moving texture of cinema film, at half strength (where an effect starts in the original)").clicked() {
+                    g.grain = crate::model::EFFECT_VALUE_DEFAULT;
+                    g.grain_size = crate::model::GRAIN_SIZE_DEFAULT;
+                    g.grain_mono = false;
+                }
+                hint(ui, "Or pick the \"Cinema film\" look above.");
+            });
         }
         let grade = g.clone();
         ui.add_space(6.0);
