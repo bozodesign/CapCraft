@@ -12,6 +12,7 @@ mod export;
 mod home;
 mod layout;
 mod looks;
+mod capstyles;
 mod library;
 mod media;
 mod model;

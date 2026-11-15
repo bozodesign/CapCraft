@@ -2085,6 +2085,153 @@ impl Project {
         }
         gone
     }
+
+    /// The Captions tab's "Remove . , ? !": those marks go from every caption, so only the words
+    /// are left (`strip_punctuation`). The heard words lose them too, so they keep their times;
+    /// a heard word that was only marks goes with its time. Captions left with nothing are
+    /// removed. Returns how many marks went.
+    pub fn remove_punctuation(&mut self) -> usize {
+        let mut gone = 0;
+        let mut empty = vec![];
+        for (ti, ci) in self.captions() {
+            let c = &mut self.tracks[ti].clips[ci];
+            let Some(s) = c.text.as_mut() else { continue };
+            let (text, n) = strip_punctuation(&s.content);
+            if n == 0 {
+                continue;
+            }
+            gone += n;
+            s.content = text;
+            if s.heard() {
+                let (mut texts, mut times) = (vec![], vec![]);
+                for (w, t) in s.word_texts.iter().zip(&s.word_times) {
+                    let (w, _) = strip_punctuation(w);
+                    if !w.is_empty() {
+                        texts.push(w);
+                        times.push(*t);
+                    }
+                }
+                s.word_texts = texts;
+                s.word_times = times;
+            }
+            if s.content.is_empty() {
+                empty.push(c.id);
+            }
+        }
+        for id in empty {
+            if let Some((ti, ci)) = self.find_clip(id) {
+                self.tracks[ti].clips.remove(ci);
+            }
+        }
+        gone
+    }
+
+    /// How many captions are shorter than `CAPTION_MIN_SHOWN`.
+    pub fn short_captions(&self) -> usize {
+        self.captions().iter().filter(|&&(ti, ci)| self.tracks[ti].clips[ci].duration < CAPTION_MIN_SHOWN - 1e-6).count()
+    }
+
+    /// Every caption made at least `CAPTION_MIN_SHOWN` long (`readable_cues`), track by track;
+    /// a caption pushed later by the one before keeps its words' times where they were heard.
+    /// Returns how many captions changed.
+    pub fn make_captions_readable(&mut self) -> usize {
+        let caps = self.captions();
+        let mut changed = 0;
+        let tracks: Vec<usize> = {
+            let mut t: Vec<usize> = caps.iter().map(|&(ti, _)| ti).collect();
+            t.dedup();
+            t
+        };
+        for ti in tracks {
+            let mut idx: Vec<usize> = caps.iter().filter(|&&(t, _)| t == ti).map(|&(_, ci)| ci).collect();
+            idx.sort_by(|&a, &b| self.tracks[ti].clips[a].start.total_cmp(&self.tracks[ti].clips[b].start));
+            let times: Vec<(f64, f64)> = idx.iter().map(|&ci| (self.tracks[ti].clips[ci].start, self.tracks[ti].clips[ci].end())).collect();
+            let fixed = readable_cues(&times);
+            for (k, &ci) in idx.iter().enumerate() {
+                let (s0, e0) = times[k];
+                let (s1, e1) = fixed[k];
+                if (s1 - s0).abs() < 1e-9 && (e1 - e0).abs() < 1e-9 {
+                    continue;
+                }
+                changed += 1;
+                let c = &mut self.tracks[ti].clips[ci];
+                c.start = s1;
+                c.duration = e1 - s1;
+                if let Some(s) = c.text.as_mut() {
+                    shift_word_times(&mut s.word_times, s1 - s0);
+                }
+            }
+        }
+        changed
+    }
+}
+
+/// The shortest any caption lasts on screen (s), whatever made it (Auto captions, ElevenLabs,
+/// a subtitle file, typed, split or trimmed): the person's rule, the same 0.6 s as a word
+/// (`WORD_MIN_SHOWN_MS`), so it can be read.
+pub const CAPTION_MIN_SHOWN: f64 = WORD_MIN_SHOWN_MS as f64 / 1000.0;
+
+/// Caption times (start, end in seconds, in time order) made readable: each one lasts at least
+/// `CAPTION_MIN_SHOWN`; when that runs it into the next one, the next starts where it ends
+/// instead (and lasts at least as long too), so the captions catch up at the next long one.
+/// Captions that already overlapped stay overlapped.
+pub fn readable_cues(cues: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    let mut out: Vec<(f64, f64)> = Vec::with_capacity(cues.len());
+    let mut prev: Option<(f64, f64)> = None; // (end as given, end as fixed)
+    for &(s, e) in cues {
+        let mut s1 = s.max(0.0);
+        if let Some((given, fixed)) = prev {
+            // only the overlap the lengthening made is taken away
+            if s1 >= given - 1e-9 && s1 < fixed {
+                s1 = fixed;
+            }
+        }
+        let e1 = e.max(s1 + CAPTION_MIN_SHOWN);
+        prev = Some((e, e1));
+        out.push((s1, e1));
+    }
+    out
+}
+
+/// Heard word times (ms from the caption's start) after the caption's start moved `by`
+/// seconds: they stay where they were heard, kept inside the caption.
+pub fn shift_word_times(times: &mut [[i32; 2]], by: f64) {
+    let ms = (by * 1000.0).round() as i32;
+    if ms == 0 {
+        return;
+    }
+    for t in times.iter_mut() {
+        t[0] = (t[0] - ms).max(0);
+        t[1] = (t[1] - ms).max(t[0]);
+    }
+}
+
+/// The marks the Captions tab's "Remove . , ? !" takes out: full stops, commas, question and
+/// exclamation marks, with the ellipsis and the full-width forms some languages write.
+pub const PUNCTUATION_REMOVED: [char; 10] = ['.', ',', '?', '!', '…', '。', '，', '？', '！', '、'];
+
+/// A text without `PUNCTUATION_REMOVED` marks, and how many went. A point or comma between two
+/// digits stays (3.5, 1,000), and the spaces left behind close up.
+pub fn strip_punctuation(text: &str) -> (String, usize) {
+    let chars: Vec<char> = text.chars().collect();
+    let mut kept = String::with_capacity(text.len());
+    let mut n = 0;
+    for (i, &c) in chars.iter().enumerate() {
+        let in_number = (c == '.' || c == ',')
+            && i > 0
+            && chars[i - 1].is_ascii_digit()
+            && chars.get(i + 1).is_some_and(|d| d.is_ascii_digit());
+        if PUNCTUATION_REMOVED.contains(&c) && !in_number {
+            n += 1;
+        } else {
+            kept.push(c);
+        }
+    }
+    if n == 0 {
+        return (text.to_string(), 0);
+    }
+    let lines: Vec<String> = kept.split('\n').map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")).collect();
+    (lines.join("\n").trim().to_string(), n)
 }
 
 /// The shortest part a split may leave on either side of the cut: 33000 µs
@@ -2114,7 +2261,10 @@ impl TextStyle {
         // 0x182721260); a part with nothing to show isn't made (CapCraft's own)
         let a: String = chars[..at].iter().collect();
         let b: String = chars[at..].iter().collect();
-        if a.trim().is_empty() || b.trim().is_empty() || dur < CAPTION_PIECE_MIN * 2.0 {
+        // the original refuses a cut closer than CAPTION_PIECE_MIN to an end; CapCraft keeps
+        // each part at least CAPTION_MIN_SHOWN, the person's shortest caption
+        let piece_min = CAPTION_PIECE_MIN.max(CAPTION_MIN_SHOWN);
+        if a.trim().is_empty() || b.trim().is_empty() || dur < piece_min * 2.0 {
             return None;
         }
         let spans = self.spans(dur);
@@ -2123,9 +2273,8 @@ impl TextStyle {
             let letters = |s: &[char]| s.iter().filter(|c| !c.is_whitespace()).count() as f64;
             dur * letters(&chars[..at]) / letters(&chars).max(1.0)
         });
-        if cut < CAPTION_PIECE_MIN || dur - cut < CAPTION_PIECE_MIN {
-            return None;
-        }
+        // a cut too near an end moves in so both parts stay readable
+        let cut = cut.clamp(piece_min, dur - piece_min);
         let ms = (cut * 1000.0).round() as i32;
         let (mut wa, mut xa, mut wb, mut xb) = (vec![], vec![], vec![], vec![]);
         if self.heard() {
@@ -2186,6 +2335,53 @@ pub fn short_time(t: f64) -> String {
 #[cfg(test)]
 mod case_tests {
     use super::*;
+
+    #[test]
+    fn every_caption_lasts_at_least_0_6_s() {
+        // a short one lengthens into the gap; one it runs into starts later; overlaps stay
+        let got = readable_cues(&[(0.0, 0.2), (0.5, 2.0), (2.0, 2.1), (3.0, 4.0), (3.5, 3.6)]);
+        let want = [(0.0, 0.6), (0.6, 2.0), (2.0, 2.6), (3.0, 4.0), (3.5, 4.1)];
+        for (g, w) in got.iter().zip(want) {
+            assert!((g.0 - w.0).abs() < 1e-9 && (g.1 - w.1).abs() < 1e-9, "{got:?}");
+        }
+        let mut t = vec![[0, 300], [300, 900]];
+        shift_word_times(&mut t, 0.1);
+        assert_eq!(t, vec![[0, 200], [200, 800]]);
+        // on a project: short captions grow, and the count goes to zero
+        let mut p = Project::new("t");
+        for (i, (s, e)) in [(0.0, 0.3), (0.4, 1.5)].into_iter().enumerate() {
+            let mut c = Clip::new(100 + i as u64, None, s, e - s);
+            c.text = Some(TextStyle::new("hi", TextKind::Caption));
+            p.place_free(TrackKind::Text, c);
+        }
+        assert_eq!(p.short_captions(), 1);
+        assert_eq!(p.make_captions_readable(), 2);
+        assert_eq!(p.short_captions(), 0);
+    }
+
+    #[test]
+    fn punctuation_goes_and_only_words_stay() {
+        assert_eq!(strip_punctuation("Hello, world! How are you?"), ("Hello world How are you".to_string(), 3));
+        assert_eq!(strip_punctuation("Wait ... what?!"), ("Wait what".to_string(), 5));
+        assert_eq!(strip_punctuation("It costs 3.5 or 1,000."), ("It costs 3.5 or 1,000".to_string(), 1));
+        assert_eq!(strip_punctuation("สวัสดีครับ, ทุกคน!"), ("สวัสดีครับ ทุกคน".to_string(), 2));
+        assert_eq!(strip_punctuation("no marks"), ("no marks".to_string(), 0));
+        // full-width marks (written as escapes: the app's fonts don't carry these letters)
+        assert_eq!(strip_punctuation("\u{4f60}\u{ff0c}\u{4e16}\u{3002}"), ("\u{4f60}\u{4e16}".to_string(), 2));
+        // heard words lose their marks too and keep their times; a mark-only word goes
+        let mut p = Project::new("t");
+        let mut c = Clip::new(7, None, 0.0, 2.0);
+        let mut s = TextStyle::new("Yes, sure !", TextKind::Caption);
+        s.word_texts = vec!["Yes,".into(), "sure".into(), "!".into()];
+        s.word_times = vec![[0, 500], [500, 1200], [1200, 1300]];
+        c.text = Some(s);
+        p.place_free(TrackKind::Text, c);
+        assert_eq!(p.remove_punctuation(), 2);
+        let s = p.clip(7).unwrap().text.clone().unwrap();
+        assert_eq!(s.content, "Yes sure");
+        assert_eq!(s.word_texts, vec!["Yes".to_string(), "sure".to_string()]);
+        assert_eq!(s.word_times, vec![[0, 500], [500, 1200]]);
+    }
 
     #[test]
     fn short_words_stay_long_enough_to_read() {

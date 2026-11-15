@@ -616,7 +616,38 @@ impl App {
                 });
             }
         }
-        ui.checkbox(&mut self.project.captions_share_style, "Same style for all").on_hover_text("Style and position apply to all captions");
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.project.captions_share_style, "Same style for all").on_hover_text("Style and position apply to all captions");
+            // a saved style put on every caption at once
+            let mut pick = None;
+            ui.add_enabled_ui(!self.caption_styles.is_empty(), |ui| {
+                egui::ComboBox::from_id_salt("capstyle_all").selected_text("My styles").width(110.0).show_ui(ui, |ui| {
+                    for (i, st) in self.caption_styles.iter().enumerate() {
+                        if ui.selectable_label(false, &st.name).on_hover_text(format!("{}, size {:.0}, {}", st.look.font, st.look.size, st.look.word_mode.name())).clicked() {
+                            pick = Some(i);
+                        }
+                    }
+                })
+                .response
+                .on_hover_text("Put one of your saved caption styles on every caption")
+                .on_disabled_hover_text("Save a caption style first: select a caption, then the 💾 under My styles in its Text panel");
+            });
+            if let Some(i) = pick {
+                let st = self.caption_styles[i].clone();
+                let mut n = 0;
+                for (ti, ci) in self.project.captions() {
+                    let c = &mut self.project.tracks[ti].clips[ci];
+                    if let Some(s) = c.text.as_mut() {
+                        crate::capstyles::apply(s, &st);
+                        n += 1;
+                    }
+                    if let (Some(p), true) = (st.place, c.keyframes.is_empty()) {
+                        c.transform = p;
+                    }
+                }
+                self.notify(format!("\"{}\" put on {n} captions", st.name));
+            }
+        });
         let caps = self.project.captions();
         Self::section(ui, &format!("Captions ({})", caps.len()));
         // find, and find & replace (the original's caption search and its Replace all)
@@ -676,6 +707,15 @@ impl App {
             if icon_button(ui, "✨", "Remove filler words (um, uh, เอ่อ, อืม...) from every caption").clicked() {
                 let n = self.project.remove_fillers();
                 self.notify(&if n == 0 { "No filler words found".to_string() } else { format!("Removed {n} filler words") });
+            }
+            if ui.add(egui::Button::new(egui::RichText::new(". , ? !").strong()).min_size(egui::vec2(0.0, 24.0))).on_hover_text("Remove . , ? ! from every caption, leaving only the words (numbers like 3.5 and 1,000 stay)").clicked() {
+                let n = self.project.remove_punctuation();
+                self.notify(&if n == 0 { "No . , ? ! found".to_string() } else { format!("Removed {n} marks") });
+            }
+            let short = self.project.short_captions();
+            if short > 0 && icon_button(ui, "⏱", &format!("{short} captions are shorter than 0.6 s: make every caption at least 0.6 s so it can be read")).clicked() {
+                let n = self.project.make_captions_readable();
+                self.notify(format!("{n} captions made at least 0.6 s"));
             }
             hint(
                 ui,

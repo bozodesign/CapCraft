@@ -132,6 +132,8 @@ pub struct App {
     win_volume_at: Option<Instant>,
     /// The person's own colour looks (the settings folder; shared by every project).
     pub my_looks: Vec<crate::looks::MyLook>,
+    /// The person's saved caption styles (settings folder, every project).
+    pub caption_styles: Vec<crate::capstyles::CaptionStyle>,
     gizmo: Option<GizmoDrag>,
 
     pub export_dialog: Option<ExportDialog>,
@@ -394,6 +396,7 @@ impl App {
             win_volume: Arc::new(Mutex::new(None)),
             win_volume_at: None,
             my_looks: crate::looks::load(),
+            caption_styles: crate::capstyles::load(),
             gizmo: None,
             export_dialog: None,
             export_status: None,
@@ -1291,6 +1294,14 @@ impl App {
             self.notify("Move the playhead over a clip to split it");
             return;
         };
+        // a caption is never split into a part shorter than CAPTION_MIN_SHOWN (the person's rule)
+        if let Some(c) = self.project.clip(id) {
+            let caption = c.text.as_ref().map(|s| s.kind == TextKind::Caption).unwrap_or(false);
+            if caption && (t - c.start < CAPTION_MIN_SHOWN - 1e-6 || c.end() - t < CAPTION_MIN_SHOWN - 1e-6) {
+                self.notify("A caption can't be cut into a part shorter than 0.6 s");
+                return;
+            }
+        }
         let new_id = self.project.new_id();
         let Some((ti, ci)) = self.project.find_clip(id) else { return };
         let a = &mut self.project.tracks[ti].clips[ci];
@@ -1711,8 +1722,16 @@ impl App {
     /// Put captions on the timeline. New ones take the default caption look for the canvas
     /// (FUN_182c15c60), or the first existing caption's look when `reuse_look` is set, as the
     /// original's speech captions do ("reuse style from first seg").
-    fn add_captions(&mut self, cues: Vec<(f64, f64, String, Vec<[i32; 2]>, Vec<String>)>, reuse_look: bool) {
+    fn add_captions(&mut self, mut cues: Vec<(f64, f64, String, Vec<[i32; 2]>, Vec<String>)>, reuse_look: bool) {
         let look = self.project.captions().first().map(|&(ti, ci)| self.project.tracks[ti].clips[ci].clone());
+        // every caption at least CAPTION_MIN_SHOWN, whatever made it (the person's rule)
+        cues.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let fixed = crate::model::readable_cues(&cues.iter().map(|c| (c.0, c.1)).collect::<Vec<_>>());
+        for (c, (s, e)) in cues.iter_mut().zip(fixed) {
+            crate::model::shift_word_times(&mut c.3, s - c.0);
+            c.0 = s;
+            c.1 = e;
+        }
         for (start, end, text, times, texts) in cues {
             let id = self.project.new_id();
             let mut clip = Clip::new(id, None, start, end - start);

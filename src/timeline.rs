@@ -26,6 +26,16 @@ pub enum DragKind {
     Zoom,
 }
 
+/// The shortest a trim may leave a clip: one frame, or for a caption `CAPTION_MIN_SHOWN` (the
+/// person's rule), unless it was already shorter.
+fn trim_min_len(o: &Clip, fps: f64) -> f64 {
+    let frame = 1.0 / fps;
+    match &o.text {
+        Some(s) if s.kind == TextKind::Caption => CAPTION_MIN_SHOWN.min(o.duration).max(frame),
+        _ => frame,
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct TlDrag {
     pub kind: DragKind,
@@ -1519,7 +1529,7 @@ impl App {
                 let pts = self.snap_points(id, d.main);
                 let (t, line) = snap1(view.t(p.x), &pts, thr);
                 d.snap_line = line;
-                let min_len = 1.0 / fps;
+                let min_len = trim_min_len(&o, fps);
                 let mut delta = (t - o.start).min(o.duration - min_len);
                 if has_len {
                     delta = delta.max(-o.src_in / o.speed);
@@ -1585,8 +1595,9 @@ impl App {
                 let start = self.project.clip(id).map(|c| c.start).unwrap_or(o.start);
                 let (t, line) = snap1(view.t(p.x), &pts, thr);
                 d.snap_line = line;
+                let min_len = trim_min_len(&o, fps);
                 if let Some(c) = self.project.clip_mut(id) {
-                    c.duration = (t - start).clamp(1.0 / fps, maxd.max(1.0 / fps));
+                    c.duration = (t - start).clamp(min_len, maxd.max(min_len));
                 }
             }
         }

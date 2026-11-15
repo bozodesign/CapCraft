@@ -272,6 +272,84 @@ fn my_looks_ui(ui: &mut egui::Ui, g: &mut crate::model::Grade, looks: &mut Vec<c
     }
 }
 
+/// "My styles": put one of the person's saved caption styles on this text (its font, size,
+/// colours, effects, word display and place; the words stay), save this text's style under a
+/// name, or delete one. Saved styles live in the settings folder, so every project has them.
+/// Returns the place put on the text, if a style with one was picked.
+fn caption_styles_ui(
+    ui: &mut egui::Ui,
+    s: &mut crate::model::TextStyle,
+    tf: Option<&mut crate::model::Transform>,
+    styles: &mut Vec<crate::capstyles::CaptionStyle>,
+) -> Option<crate::model::Transform> {
+    let mut changed = false;
+    let mut placed = None;
+    let mut tf = tf;
+    let cur = styles.iter().position(|st| crate::capstyles::matches(s, st));
+    ui.horizontal(|ui| {
+        ui.add_sized([86.0, 20.0], egui::Label::new(RichText::new("Style").color(MUTED)));
+        let shown = match cur {
+            Some(i) => styles[i].name.clone(),
+            None if styles.is_empty() => "None saved yet".to_string(),
+            None => "Pick one".to_string(),
+        };
+        let mut pick = None;
+        let mut remove = None;
+        egui::ComboBox::from_id_salt("capstyles").selected_text(shown).width(150.0).show_ui(ui, |ui| {
+            if styles.is_empty() {
+                ui.label(RichText::new("Save a style below to see it here.").color(MUTED));
+            }
+            for (i, st) in styles.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    if ui.small_button("✖").on_hover_text("Delete this style").clicked() {
+                        remove = Some(i);
+                    }
+                    if ui.selectable_label(cur == Some(i), &st.name).on_hover_text(format!("{}, size {:.0}, {}", st.look.font, st.look.size, st.look.word_mode.name())).clicked() {
+                        pick = Some(i);
+                    }
+                });
+            }
+        })
+        .response
+        .on_hover_text("Your own caption styles, kept for every project: font, size, colours, outline, background, glow, shadow, how the words show, animations and where it sits. Picking one puts it on this text; the words stay.");
+        if let Some(i) = pick {
+            crate::capstyles::apply(s, &styles[i]);
+            if let (Some(p), Some(t)) = (styles[i].place, tf.as_deref_mut()) {
+                *t = p;
+                placed = Some(p);
+            }
+        }
+        if let Some(i) = remove {
+            styles.remove(i);
+            changed = true;
+        }
+    });
+    let id = egui::Id::new("caption_style_name");
+    let mut name = ui.data(|d| d.get_temp::<String>(id)).unwrap_or_else(|| cur.map(|i| styles[i].name.clone()).unwrap_or_default());
+    ui.horizontal(|ui| {
+        let ok = !name.trim().is_empty();
+        let replaces = styles.iter().any(|st| st.name.to_lowercase() == name.trim().to_lowercase());
+        let w = (ui.available_width() - 40.0).clamp(80.0, 260.0);
+        let r = ui.add(egui::TextEdit::singleline(&mut name).thai().hint_text("Name for this style").char_limit(crate::capstyles::NAME_MAX).desired_width(w));
+        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let b = ui.add_enabled(ok, egui::Button::new(RichText::new("💾").size(15.0)));
+        let b = if ok {
+            b.on_hover_text(if replaces { "Save over your style with this name" } else { "Save this text's style (font, size, colours, effects, word display and place) for any project" })
+        } else {
+            b.on_disabled_hover_text("Give the style a name first")
+        };
+        if (b.clicked() || (enter && ok)) && crate::capstyles::put(styles, &name, s, tf.as_deref().copied()).is_some() {
+            name = name.trim().chars().take(crate::capstyles::NAME_MAX).collect();
+            changed = true;
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(id, name));
+    if changed {
+        crate::capstyles::save(styles);
+    }
+    placed
+}
+
 fn slider(ui: &mut egui::Ui, label: &str, v: &mut f32, range: std::ops::RangeInclusive<f32>, default: f32, suffix: &str, scale: f32) {
     ui.horizontal(|ui| {
         ui.add_sized([86.0, 20.0], egui::Label::new(RichText::new(label).color(MUTED)));
@@ -979,11 +1057,15 @@ impl App {
     fn text_style_ui(&mut self, ui: &mut egui::Ui, id: u64) {
         let share = self.project.captions_share_style;
         let Some(before) = self.project.clip(id).and_then(|c| c.text.clone()) else { return };
+        let placed;
         {
             let Some(c) = self.project.clip_mut(id) else { return };
             let dur = c.duration;
             let Some(s) = c.text.as_mut() else { return };
             ui.add(egui::TextEdit::multiline(&mut s.content).thai().desired_rows(3).desired_width(f32::INFINITY).hint_text("Type your text"));
+            heading(ui, "My styles");
+            let tf = if c.keyframes.is_empty() { Some(&mut c.transform) } else { None };
+            placed = caption_styles_ui(ui, s, tf, &mut self.caption_styles);
             heading(ui, "Font");
             ui.horizontal(|ui| {
                 ui.add_sized([86.0, 20.0], egui::Label::new(RichText::new("Font").color(MUTED)));
@@ -1145,6 +1227,15 @@ impl App {
         }
         if after.case != before.case && after.kind == TextKind::Caption {
             self.project.set_caption_case(after.case);
+        }
+        // a style's place goes to every caption too when they share one style
+        if let (Some(tf), true, TextKind::Caption) = (placed, share, after.kind) {
+            for (ti, ci) in self.project.captions() {
+                let c = &mut self.project.tracks[ti].clips[ci];
+                if c.keyframes.is_empty() {
+                    c.transform = tf;
+                }
+            }
         }
         if after.kind == TextKind::Caption {
             ui.add_space(4.0);
