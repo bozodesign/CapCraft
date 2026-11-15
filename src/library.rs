@@ -849,7 +849,7 @@ impl App {
                     }
                     focus(ui.ctx(), new_id, 0);
                 }
-                None => self.notify("Put the cursor between words to split this caption"),
+                None => self.notify("Put the cursor between words, leaving each part at least 0.6 s, to split this caption"),
             },
             Some(Act::MergeUp(k)) => {
                 let (a, b) = (ids[k - 1], ids[k]);

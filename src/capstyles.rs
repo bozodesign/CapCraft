@@ -9,11 +9,18 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 pub struct CaptionStyle {
     pub name: String,
+    /// Which layout of this file wrote it, as the original's text presets carry a "version"
+    /// beside their "name" (TextPreset::RegisterParams 0x18100f350).
+    #[serde(default)]
+    pub version: u32,
     pub look: TextStyle,
     /// Where the caption sits (position, size, turn); None keeps each caption where it is.
     #[serde(default)]
     pub place: Option<Transform>,
 }
+
+/// The layout this build writes.
+pub const VERSION: u32 = 1;
 
 /// Longest name kept (characters, our own choice, as for colour looks).
 pub const NAME_MAX: usize = 40;
@@ -66,7 +73,7 @@ pub fn put(styles: &mut Vec<CaptionStyle>, name: &str, s: &TextStyle, place: Opt
     if name.is_empty() {
         return None;
     }
-    let style = CaptionStyle { name: name.clone(), look: look_of(s), place };
+    let style = CaptionStyle { name: name.clone(), version: VERSION, look: look_of(s), place };
     match styles.iter().position(|l| l.name.to_lowercase() == name.to_lowercase()) {
         Some(i) => {
             styles[i] = style;
@@ -79,7 +86,10 @@ pub fn put(styles: &mut Vec<CaptionStyle>, name: &str, s: &TextStyle, place: Opt
     }
 }
 
-/// Put a saved style on a caption: its look, keeping the caption's own words and times.
+/// Put a saved style on a caption: its look over the whole text, keeping the caption's own
+/// words and times, as the original applies a text preset's style to the full text range
+/// (RichTextUtils::richTextFromPresetStyle 0x18271dea0: fill, strokes and shadows with
+/// their colour, alpha, width, angle, distance and softness).
 pub fn apply(s: &mut TextStyle, style: &CaptionStyle) {
     s.copy_look(&style.look);
 }

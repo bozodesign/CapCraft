@@ -2273,8 +2273,11 @@ impl TextStyle {
             let letters = |s: &[char]| s.iter().filter(|c| !c.is_whitespace()).count() as f64;
             dur * letters(&chars[..at]) / letters(&chars).max(1.0)
         });
-        // a cut too near an end moves in so both parts stay readable
-        let cut = cut.clamp(piece_min, dur - piece_min);
+        // a cut too near an end is refused, as the original's TextClipUtils::checkSplitPos
+        // 0x182654f00 does (it answers false with that end), with the person's 0.6 s
+        if cut < piece_min || dur - cut < piece_min {
+            return None;
+        }
         let ms = (cut * 1000.0).round() as i32;
         let (mut wa, mut xa, mut wb, mut xb) = (vec![], vec![], vec![], vec![]);
         if self.heard() {
@@ -2577,7 +2580,7 @@ mod caption_list_tests {
         // cut right at the cursor, the space kept, as the original's splitRichText does
         assert_eq!(p.clip(b).unwrap().text.as_ref().unwrap().content, " cdef");
         assert!(p.split_caption(b, 0).is_none(), "nothing before the cursor");
-        // a cut closer than 0.033 s to an end is refused
+        // a cut leaving a part under 0.6 s is refused (checkSplitPos 0x182654f00 with the person's 0.6 s)
         let c = caption(&mut p, "a bcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz", 10.0, 1.0);
         assert!(p.split_caption(c, 1).is_none());
     }
