@@ -1520,6 +1520,12 @@ pub struct Clip {
     /// 0x1828db3a0, keeps the volume points aside the same way).
     #[serde(default = "one")]
     pub last_volume: f32,
+    /// The group the clip belongs to (clips grouped with Ctrl+G are picked and moved
+    /// together). The original keeps a group id on each segment (get_segment_group_id
+    /// 0x18109d0e0, set_segment_group_id 0x1810c3140; MAKE_SEGMENT_GROUP_ACTION and
+    /// REMOVE_SEGMENT_GROUP_ACTION).
+    #[serde(default)]
+    pub group: Option<u64>,
 }
 
 fn one() -> f32 {
@@ -1564,6 +1570,7 @@ impl Clip {
             text: None,
             vol_points: vec![],
             last_volume: 1.0,
+            group: None,
         }
     }
     /// Mute, or unmute back to the level it had (its volume points stay either way).
@@ -1773,6 +1780,108 @@ impl Project {
 
     pub fn media(&self, id: u64) -> Option<&Media> {
         self.media.iter().find(|m| m.id == id)
+    }
+
+    /// How many clips use a media file, on every track (hidden and muted ones too). The
+    /// original walks every segment of the project the same way to learn which materials are
+    /// in use (get_used_material_items_info, videoeditor.dll 0x181baa350, via
+    /// DraftQuery::get_all_segments).
+    pub fn media_uses(&self, id: u64) -> usize {
+        self.tracks.iter().flat_map(|t| t.clips.iter()).filter(|c| c.media == Some(id)).count()
+    }
+
+    /// The media no clip uses: what "Clear unused media" takes away.
+    pub fn unused_media(&self) -> Vec<u64> {
+        self.media.iter().filter(|m| self.media_uses(m.id) == 0).map(|m| m.id).collect()
+    }
+
+    /// Take a media file out of the project, with every clip that uses it. Returns how many
+    /// clips went. The file on the computer stays.
+    pub fn remove_media(&mut self, id: u64) -> usize {
+        let mut gone = 0;
+        for t in &mut self.tracks {
+            let n = t.clips.len();
+            t.clips.retain(|c| c.media != Some(id));
+            gone += n - t.clips.len();
+        }
+        self.media.retain(|m| m.id != id);
+        self.tidy_groups();
+        self.relayout();
+        gone
+    }
+
+    /// The clips in the same group as this one (itself included), or just itself.
+    pub fn group_of(&self, clip_id: u64) -> Vec<u64> {
+        let g = self.clip(clip_id).and_then(|c| c.group);
+        match g {
+            Some(g) => self.tracks.iter().flat_map(|t| t.clips.iter()).filter(|c| c.group == Some(g)).map(|c| c.id).collect(),
+            None => vec![clip_id],
+        }
+    }
+
+    /// Put these clips in one new group (they leave any group they were in). Needs two or
+    /// more clips. Returns the group's id.
+    pub fn make_group(&mut self, ids: &[u64]) -> Option<u64> {
+        let ids: Vec<u64> = ids.iter().copied().filter(|&id| self.clip(id).is_some()).collect();
+        if ids.len() < 2 {
+            return None;
+        }
+        let g = self.new_id();
+        for id in ids {
+            if let Some(c) = self.clip_mut(id) {
+                c.group = Some(g);
+            }
+        }
+        self.tidy_groups();
+        Some(g)
+    }
+
+    /// Take these clips and everything grouped with them out of their groups.
+    pub fn break_groups(&mut self, ids: &[u64]) -> usize {
+        let groups: Vec<u64> = ids.iter().filter_map(|&id| self.clip(id).and_then(|c| c.group)).collect();
+        let mut n = 0;
+        for t in &mut self.tracks {
+            for c in t.clips.iter_mut() {
+                if c.group.is_some_and(|g| groups.contains(&g)) {
+                    c.group = None;
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    /// A group left with fewer than two clips is no group: its last clip goes free.
+    pub fn tidy_groups(&mut self) {
+        let mut count: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+        for c in self.tracks.iter().flat_map(|t| t.clips.iter()) {
+            if let Some(g) = c.group {
+                *count.entry(g).or_default() += 1;
+            }
+        }
+        for t in &mut self.tracks {
+            for c in t.clips.iter_mut() {
+                if c.group.is_some_and(|g| count.get(&g).copied().unwrap_or(0) < 2) {
+                    c.group = None;
+                }
+            }
+        }
+    }
+
+    /// Give copied clips groups of their own: clips that shared a group still share one,
+    /// but a new one, so a copy never joins the group it was copied from.
+    pub fn regroup_copies<'a>(&mut self, clips: impl Iterator<Item = &'a mut Clip>) {
+        let mut map: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+        for c in clips {
+            if let Some(g) = c.group {
+                let n = *map.entry(g).or_insert_with(|| {
+                    let id = self.next_id;
+                    self.next_id += 1;
+                    id
+                });
+                c.group = Some(n);
+            }
+        }
     }
 
     pub fn main_index(&self) -> usize {
@@ -2380,6 +2489,71 @@ pub fn short_time(t: f64) -> String {
         format!("{}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60)
     } else {
         format!("{:02}:{:02}", s / 60, s % 60)
+    }
+}
+
+#[cfg(test)]
+mod media_group_tests {
+    use super::*;
+
+    fn media(id: u64, name: &str) -> Media {
+        Media { id, kind: MediaKind::Video, path: format!("C:/v/{name}"), name: name.into(), duration: 5.0, width: 1920, height: 1080, has_audio: false, fps: 30.0, color: [0; 4], color2: [0; 4] }
+    }
+
+    #[test]
+    fn media_can_leave_the_project_and_unused_media_can_be_cleared() {
+        let mut p = Project::new("t");
+        p.media = vec![media(1, "a.mp4"), media(2, "b.mp4"), media(3, "c.mp4")];
+        p.next_id = 10;
+        let mi = p.main_index();
+        p.tracks[mi].clips.push(Clip::new(10, Some(1), 0.0, 2.0));
+        p.tracks[mi].clips.push(Clip::new(11, Some(2), 2.0, 2.0));
+        p.place_free(TrackKind::Overlay, Clip::new(12, Some(1), 0.5, 1.0));
+        p.relayout();
+        assert_eq!(p.media_uses(1), 2);
+        assert_eq!(p.unused_media(), vec![3]);
+        // taking a used file out takes its clips too; the main track closes up
+        assert_eq!(p.remove_media(1), 2);
+        assert!(p.media(1).is_none());
+        assert_eq!(p.tracks[mi].clips.len(), 1);
+        assert_eq!(p.tracks[mi].clips[0].start, 0.0);
+        let unused = p.unused_media();
+        assert_eq!(unused, vec![3]);
+        for id in unused {
+            p.remove_media(id);
+        }
+        assert_eq!(p.media.len(), 1);
+    }
+
+    #[test]
+    fn grouped_clips_go_together_and_copies_get_their_own_group() {
+        let mut p = Project::new("t");
+        p.next_id = 100;
+        for (id, s) in [(1, 0.0), (2, 3.0), (3, 6.0)] {
+            p.place_free(TrackKind::Overlay, Clip::new(id, None, s, 1.0));
+        }
+        assert_eq!(p.make_group(&[1]), None);
+        let g = p.make_group(&[1, 2]).unwrap();
+        let mut got = p.group_of(2);
+        got.sort();
+        assert_eq!(got, vec![1, 2]);
+        assert_eq!(p.group_of(3), vec![3]);
+        // a group left with one clip is no group
+        let (ti, ci) = p.find_clip(2).unwrap();
+        p.tracks[ti].clips.remove(ci);
+        p.tidy_groups();
+        assert_eq!(p.clip(1).unwrap().group, None);
+        // copies of grouped clips share a new group, not the old one
+        p.make_group(&[1, 3]).unwrap();
+        let old = p.clip(1).unwrap().group;
+        let mut copies = vec![p.clip(1).unwrap().clone(), p.clip(3).unwrap().clone()];
+        p.regroup_copies(copies.iter_mut());
+        assert_eq!(copies[0].group, copies[1].group);
+        assert_ne!(copies[0].group, old);
+        assert_ne!(Some(g), copies[0].group);
+        // ungrouping one clip frees its whole group
+        assert_eq!(p.break_groups(&[3]), 2);
+        assert_eq!(p.clip(1).unwrap().group, None);
     }
 }
 

@@ -38,12 +38,72 @@ pub struct Item {
     pub path: String,
     pub name: String,
     pub cat: Cat,
+    /// Clips kept together from a timeline (empty for a file): each with its edits, the kind
+    /// of track it was on and that track's place among the tracks of its kind.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clips: Vec<SavedClip>,
+    /// The files those clips use.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub media: Vec<crate::model::Media>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SavedClip {
+    pub kind: crate::model::TrackKind,
+    pub kind_idx: usize,
+    pub clip: crate::model::Clip,
 }
 
 impl Item {
+    /// Clips kept from a timeline, rather than one file.
+    pub fn is_group(&self) -> bool {
+        !self.clips.is_empty()
+    }
+    /// A file is still there; for kept clips, every file they use.
     pub fn exists(&self) -> bool {
+        if self.is_group() {
+            return self.media.iter().all(|m| m.path.is_empty() || Path::new(&m.path).is_file());
+        }
         Path::new(&self.path).is_file()
     }
+    /// The file to show as its picture: the first picture or video it uses.
+    pub fn picture_path(&self) -> Option<&str> {
+        if !self.is_group() {
+            return Some(&self.path);
+        }
+        let first = self.clips.iter().filter_map(|s| s.clip.media).find_map(|id| self.media.iter().find(|m| m.id == id && m.is_visual() && !m.path.is_empty()));
+        first.or_else(|| self.media.iter().find(|m| !m.path.is_empty())).map(|m| m.path.as_str())
+    }
+    /// How long the kept clips last together (seconds).
+    pub fn length(&self) -> f64 {
+        let s = self.clips.iter().map(|c| c.clip.start).fold(f64::INFINITY, f64::min);
+        let e = self.clips.iter().map(|c| c.clip.end()).fold(0.0, f64::max);
+        if s.is_finite() { (e - s).max(0.0) } else { 0.0 }
+    }
+}
+
+/// Clips from a timeline as a My library item, their times counted from the first one.
+/// Text clips keep their words; a clip's file must come along in `media`. None for no clips.
+pub fn group_item(mut clips: Vec<SavedClip>, media: Vec<crate::model::Media>) -> Option<Item> {
+    if clips.is_empty() {
+        return None;
+    }
+    clips.sort_by(|a, b| a.clip.start.total_cmp(&b.clip.start));
+    let s0 = clips[0].clip.start;
+    for c in clips.iter_mut() {
+        c.clip.start -= s0;
+    }
+    let name = if clips.len() == 1 {
+        let c = &clips[0].clip;
+        match (&c.text, c.media.and_then(|id| media.iter().find(|m| m.id == id))) {
+            (Some(t), _) => t.content.lines().next().unwrap_or("Text").chars().take(40).collect(),
+            (_, Some(m)) => m.name.clone(),
+            _ => "Clip".to_string(),
+        }
+    } else {
+        format!("{} clips", clips.len())
+    };
+    Some(Item { path: String::new(), name, cat: Cat::Other, clips, media })
 }
 
 fn file() -> PathBuf {
@@ -97,7 +157,7 @@ pub fn file_name(path: &Path) -> String {
 }
 
 pub fn new_item(path: &Path) -> Item {
-    Item { path: path.to_string_lossy().into(), name: file_name(path), cat: guess(path) }
+    Item { path: path.to_string_lossy().into(), name: file_name(path), cat: guess(path), clips: vec![], media: vec![] }
 }
 
 /// Longest name kept (characters). Our own choice: the original's limit sits in its closed
@@ -111,7 +171,7 @@ pub const NAME_MAX: usize = 80;
 pub fn rename(it: &mut Item, name: &str) -> bool {
     let mut n: String = name.trim().chars().filter(|c| !c.is_control()).take(NAME_MAX).collect();
     if n.is_empty() {
-        n = file_name(Path::new(&it.path));
+        n = if it.is_group() { format!("{} clips", it.clips.len()) } else { file_name(Path::new(&it.path)) };
     }
     if n == it.name {
         return false;
@@ -123,6 +183,25 @@ pub fn rename(it: &mut Item, name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timeline_clips_are_kept_with_times_from_the_first_and_survive_a_save() {
+        use crate::model::{Clip, TrackKind};
+        assert!(group_item(vec![], vec![]).is_none());
+        let a = SavedClip { kind: TrackKind::Overlay, kind_idx: 0, clip: Clip::new(5, None, 7.0, 2.0) };
+        let b = SavedClip { kind: TrackKind::Text, kind_idx: 1, clip: Clip::new(6, None, 4.0, 1.0) };
+        let it = group_item(vec![a, b], vec![]).unwrap();
+        assert!(it.is_group() && it.exists());
+        assert_eq!(it.name, "2 clips");
+        assert_eq!(it.clips[0].clip.start, 0.0);
+        assert_eq!(it.clips[1].clip.start, 3.0);
+        assert!((it.length() - 5.0).abs() < 1e-9);
+        let back: Vec<Item> = serde_json::from_str(&serde_json::to_string(&vec![it]).unwrap()).unwrap();
+        assert_eq!(back[0].clips.len(), 2);
+        // a plain file still reads back from an older list
+        let old: Vec<Item> = serde_json::from_str(r#"[{"path":"C:/a.mp4","name":"a.mp4","cat":"Intro"}]"#).unwrap();
+        assert!(!old[0].is_group());
+    }
 
     #[test]
     fn a_library_file_can_get_a_new_name_and_its_file_stays() {

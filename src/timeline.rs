@@ -1042,7 +1042,7 @@ impl App {
                         } else if ctrl && !g.is_empty() {
                             self.toggle_pick(id);
                         } else {
-                            self.pick(vec![id]);
+                            self.pick_with_group(id);
                         }
                         if !locked(self, id) {
                             let mut d = mk(DragKind::Move, id, self);
@@ -1072,9 +1072,19 @@ impl App {
                 self.drag_update(&mut d, p, view, thr, fps, &rows);
             }
             let released = resp.drag_stopped() || !ui.input(|i| i.pointer.any_down());
-            if released {
+            let over_mine = d.kind == DragKind::Move && self.mine_rects.iter().any(|r| r.contains(p));
+            if released && over_mine {
+                self.keep_dragged_in_mine(&d);
+            } else if released {
                 self.finish_drag(&d, p, &rows, view);
             } else {
+                if over_mine {
+                    // say what letting go there does
+                    for r in self.mine_rects.clone() {
+                        ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("mine_drop"))).rect_stroke(r.shrink(1.0), 5.0, Stroke::new(1.5_f32, ACCENT), egui::StrokeKind::Inside);
+                    }
+                    ui.ctx().set_cursor_icon(CursorIcon::Copy);
+                }
                 self.tl_drag = Some(d);
             }
         } else if !ui.input(|i| i.pointer.any_down()) {
@@ -1104,7 +1114,7 @@ impl App {
                     }
                     // a click on a clip picks it and brings the playhead to where it was clicked
                     Hit::Edge(id, _) | Hit::Clip(id) => {
-                        self.pick(vec![id]);
+                        self.pick_with_group(id);
                         self.seek(view.t(p.x).max(0.0));
                     }
                     Hit::VolPoint(id, _) | Hit::VolLine(id) | Hit::Fade(id, _) => self.pick(vec![id]),
@@ -1146,14 +1156,28 @@ impl App {
                     if self.group().contains(&id) {
                         self.selection = Selection::Clip(id);
                     } else {
-                        self.pick(vec![id]);
+                        self.pick_with_group(id);
                     }
                 }
             }
         }
         let picked_n = self.group().len();
+        let grouped = self.picked_grouped();
         resp.context_menu(|ui| {
             if picked_n > 1 {
+                if grouped {
+                    if ui.button("Ungroup").on_hover_text("Ctrl+Shift+G: the clips go back to moving on their own").clicked() {
+                        self.ungroup_picked();
+                        ui.close_menu();
+                    }
+                } else if ui.button(format!("🔗 Group {picked_n} clips")).on_hover_text("Ctrl+G: click one and they're all picked; they move and delete together").clicked() {
+                    self.group_picked();
+                    ui.close_menu();
+                }
+                if ui.button("⭐ Keep in My library").on_hover_text("Keep these clips together in My library, to drop into any project (or drag them onto My library)").clicked() {
+                    self.save_picked_to_mine();
+                    ui.close_menu();
+                }
                 if ui.button(format!("🗑 Delete {picked_n} clips")).clicked() {
                     self.delete_selected();
                     ui.close_menu();
@@ -1189,6 +1213,10 @@ impl App {
                 }
                 if ui.button("♦ Keyframe at playhead").clicked() {
                     self.toggle_keyframe();
+                    ui.close_menu();
+                }
+                if ui.button("⭐ Keep in My library").on_hover_text("Keep this clip (with its edits) in My library, to drop into any project").clicked() {
+                    self.save_picked_to_mine();
                     ui.close_menu();
                 }
                 if ui.button("🗑 Delete").clicked() {
@@ -1264,6 +1292,12 @@ impl App {
                             self.apply_filter(f, target);
                         }
                         LibItem::Transition(k) => self.apply_transition(k, Some(view.t(p.x))),
+                        LibItem::Group(i) => {
+                            if let Some(it) = self.mylib.get(i).cloned() {
+                                let ctx = ui.ctx().clone();
+                                self.place_mine_group(&ctx, &it, t);
+                            }
+                        }
                     }
                     self.lib_drag = None;
                 }
@@ -1319,6 +1353,14 @@ impl App {
                 let sel = picked.contains(&c.id);
                 let dim = dragging_main == Some(c.id) || tr.hidden;
                 self.draw_clip(&painter, c, row.kind, r, sel, dim, view, content);
+                // grouped clips carry a link mark at their bottom right
+                if c.group.is_some() && r.width() > 22.0 {
+                    let vis = r.intersect(content);
+                    let b = Rect::from_min_size(pos2(r.right() - 17.0, r.bottom() - 15.0), egui::vec2(14.0, 12.0));
+                    let cp = painter.with_clip_rect(vis);
+                    cp.rect_filled(b, 3.0, Color32::from_black_alpha(170));
+                    cp.text(b.center(), Align2::CENTER_CENTER, "🔗", FontId::proportional(9.0), Color32::WHITE);
+                }
             }
             if row.kind == TrackKind::Main && tr.clips.len() > 1 && dragging_main.is_none() {
                 for i in 0..tr.clips.len() - 1 {
@@ -1601,6 +1643,26 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Clips dragged off the timeline onto My library: they go back where they were and a
+    /// copy of them is kept in My library.
+    fn keep_dragged_in_mine(&mut self, d: &TlDrag) {
+        if let (Some(o), false) = (&d.orig, d.main) {
+            if let Some(c) = self.project.clip_mut(d.clip_id) {
+                c.start = o.start;
+            }
+        }
+        let mi = self.project.main_index();
+        for &(gid, gs) in &d.group {
+            let on_main = self.project.find_clip(gid).map(|(t, _)| t == mi).unwrap_or(false);
+            if let (false, Some(c)) = (on_main, self.project.clip_mut(gid)) {
+                c.start = gs;
+            }
+        }
+        self.project.relayout();
+        self.save_picked_to_mine();
+        self.tab = crate::app::LibTab::Mine;
     }
 
     fn finish_drag(&mut self, d: &TlDrag, p: Pos2, rows: &[Row], view: View) {

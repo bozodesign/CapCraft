@@ -42,6 +42,8 @@ pub enum LibItem {
     Effect(VideoEffect),
     Filter(Filter),
     Transition(TransitionKind),
+    /// Clips kept together in My library (its place in the list).
+    Group(usize),
 }
 
 pub enum Loaded {
@@ -103,6 +105,9 @@ pub struct App {
     pub snapping: bool,
     pub tl_drag: Option<crate::timeline::TlDrag>,
     pub lib_drag: Option<LibItem>,
+    /// Where clips dragged off the timeline are kept in My library when let go (the Mine tab,
+    /// and My library itself while it's open), as drawn last.
+    pub mine_rects: Vec<Rect>,
     /// The time under the mouse while it is over the timeline (the original's preview axis):
     /// the player shows that frame while not playing.
     pub tl_hover_t: Option<f64>,
@@ -378,6 +383,7 @@ impl App {
             snapping: true,
             tl_drag: None,
             lib_drag: None,
+            mine_rects: vec![],
             tl_hover_t: None,
             clip_copy: vec![],
             timeline_rect: Rect::NOTHING,
@@ -703,6 +709,10 @@ impl App {
         }
         let (path, new) = (it.path.clone(), it.name.clone());
         crate::mylib::save(&self.mylib);
+        // kept clips have no file of their own: only their name in My library changes
+        if path.is_empty() {
+            return;
+        }
         let medias = std::iter::once(&mut self.project.media)
             .chain(std::iter::once(&mut self.committed.media))
             .chain(std::iter::once(&mut self.last_frame.media))
@@ -718,7 +728,7 @@ impl App {
     fn add_media_record(&mut self, mut m: Media) {
         // a My library file keeps the name it was given there, as the original's material
         // carries its own title (material_name → common_attr.title) apart from its path
-        if let Some(it) = self.mylib.iter().find(|i| crate::mylib::same_path(&i.path, &m.path)) {
+        if let Some(it) = self.mylib.iter().find(|i| !i.path.is_empty() && crate::mylib::same_path(&i.path, &m.path)) {
             m.name = it.name.clone();
         }
         for snap in self.undo.iter_mut().chain(self.redo.iter_mut()) {
@@ -877,6 +887,10 @@ impl App {
 
     /// Use a My library item: intros go first, outros last, music on the sound track from 0.
     pub fn use_mine(&mut self, ctx: &egui::Context, item: &crate::mylib::Item) {
+        if item.is_group() {
+            self.place_mine_group(ctx, item, self.playhead);
+            return;
+        }
         if let Some(id) = self.project.media.iter().find(|m| crate::mylib::same_path(&m.path, &item.path)).map(|m| m.id) {
             self.place_mine(id, item.cat);
         } else {
@@ -1392,6 +1406,7 @@ impl App {
                     None => {}
                 }
             }
+            self.project.tidy_groups();
             self.project.relayout();
             if !kept.is_empty() {
                 self.notify("Clips on locked tracks were kept");
@@ -1407,6 +1422,7 @@ impl App {
                         return;
                     }
                     self.project.tracks[ti].clips.remove(ci);
+                    self.project.tidy_groups();
                     self.project.relayout();
                 }
                 self.selection = Selection::None;
@@ -1455,12 +1471,18 @@ impl App {
         if self.clip_copy.is_empty() {
             return;
         }
-        let t0 = self.playhead;
-        let s0 = self.clip_copy.iter().map(|(_, _, c)| c.start).fold(f64::INFINITY, f64::min);
+        let copy = self.clip_copy.clone();
+        self.paste_clips(copy, self.playhead);
+    }
+
+    /// Put clips in at `t0`, keeping the times between them (see paste_at_playhead). Copies of
+    /// grouped clips form new groups of their own. Picks the clips put in and returns them.
+    pub fn paste_clips(&mut self, mut copy: Vec<(TrackKind, usize, Clip)>, t0: f64) -> Vec<u64> {
+        self.project.regroup_copies(copy.iter_mut().map(|(_, _, c)| c));
+        let s0 = copy.iter().map(|(_, _, c)| c.start).fold(f64::INFINITY, f64::min);
         let mut new_ids = vec![];
         let mut main_clips = vec![];
         let mut others: Vec<(TrackKind, usize, Clip)> = vec![];
-        let copy = self.clip_copy.clone();
         for (kind, kind_idx, c) in copy {
             let mut n = c.clone();
             n.id = self.project.new_id();
@@ -1485,8 +1507,151 @@ impl App {
             }
         }
         self.project.paste_on_tracks(others);
+        self.project.tidy_groups();
         self.project.relayout();
-        self.pick(new_ids);
+        self.pick(new_ids.clone());
+        new_ids
+    }
+
+    /// Pick a clip, and with it every clip of its group.
+    pub fn pick_with_group(&mut self, id: u64) {
+        let mut ids = self.project.group_of(id);
+        ids.retain(|&o| o != id);
+        ids.insert(0, id);
+        self.pick(ids);
+    }
+
+    /// Ctrl+G: the picked clips become one group (picked, moved and deleted together).
+    pub fn group_picked(&mut self) {
+        let ids = self.group();
+        if ids.len() < 2 {
+            self.notify("Pick two or more clips to group them (Ctrl+click or drag a box)");
+            return;
+        }
+        if self.project.make_group(&ids).is_some() {
+            self.notify(format!("{} clips grouped", ids.len()));
+        }
+    }
+
+    /// Ctrl+Shift+G: the picked clips' groups come apart (the clips stay picked).
+    pub fn ungroup_picked(&mut self) {
+        let ids = self.group();
+        if self.project.break_groups(&ids) > 0 {
+            self.notify("Ungrouped");
+        }
+    }
+
+    /// The picked clips (or the selected one) are grouped.
+    pub fn picked_grouped(&self) -> bool {
+        self.group().iter().any(|&id| self.project.clip(id).is_some_and(|c| c.group.is_some()))
+    }
+
+    /// Take a media file out of the project (and every clip that uses it).
+    pub fn remove_media_from_project(&mut self, id: u64) {
+        let name = self.project.media(id).map(|m| m.name.clone()).unwrap_or_default();
+        let clips = self.project.remove_media(id);
+        if self.lib_selected == Some(id) {
+            self.lib_selected = None;
+        }
+        self.fix_selection();
+        let proj = &self.project;
+        self.picked.retain(|&c| proj.clip(c).is_some());
+        self.notify(if clips == 0 { format!("Removed {name} from the project") } else { format!("Removed {name} and its {clips} clip(s) from the timeline (Ctrl+Z brings them back)") });
+    }
+
+    /// Take out every media file no clip uses.
+    pub fn clear_unused_media(&mut self) {
+        let ids = self.project.unused_media();
+        // backgrounds (colours) aren't files, so they aren't counted
+        let files = ids.iter().filter(|&&id| self.project.media(id).is_some_and(|m| m.kind != MediaKind::Color)).count();
+        if ids.is_empty() {
+            self.notify("Every media file is in use");
+            return;
+        }
+        for &id in &ids {
+            self.project.remove_media(id);
+        }
+        if self.lib_selected.is_some_and(|m| ids.contains(&m)) {
+            self.lib_selected = None;
+        }
+        self.notify(format!("Removed {files} unused media file(s)"));
+    }
+
+    /// The picked clips (or the selected one) as My library keeps them: each with its kind and
+    /// the place of its track among the tracks of its kind.
+    pub fn picked_for_mine(&self) -> Option<crate::mylib::Item> {
+        let mut clips = vec![];
+        let mut media: Vec<Media> = vec![];
+        for id in self.group() {
+            let Some((ti, ci)) = self.project.find_clip(id) else { continue };
+            let t = &self.project.tracks[ti];
+            let kind_idx = self.project.tracks[..ti].iter().filter(|o| o.kind == t.kind).count();
+            let c = t.clips[ci].clone();
+            if let Some(m) = c.media.and_then(|m| self.project.media(m)) {
+                if !media.iter().any(|x| x.id == m.id) {
+                    media.push(m.clone());
+                }
+            }
+            clips.push(crate::mylib::SavedClip { kind: t.kind, kind_idx, clip: c });
+        }
+        crate::mylib::group_item(clips, media)
+    }
+
+    /// Keep the picked clips in My library, to use in any project.
+    pub fn save_picked_to_mine(&mut self) {
+        match self.picked_for_mine() {
+            Some(it) => {
+                let n = it.clips.len();
+                self.mylib.push(it);
+                crate::mylib::save(&self.mylib);
+                self.notify(format!("{n} clip(s) kept in My library"));
+            }
+            None => self.notify("Pick the clips to keep first"),
+        }
+    }
+
+    /// Put a group from My library into the project at `t`: its files come into the project
+    /// (or the ones already here are used), its clips go in as a paste does, grouped again.
+    pub fn place_mine_group(&mut self, ctx: &egui::Context, item: &crate::mylib::Item, t: f64) {
+        let mut map: HashMap<u64, u64> = HashMap::new();
+        for m in &item.media {
+            let id = if m.path.is_empty() {
+                let id = self.project.new_id();
+                let mut n = m.clone();
+                n.id = id;
+                self.project.media.push(n);
+                Some(id)
+            } else {
+                self.media_for_path(ctx, &m.path)
+            };
+            if let Some(id) = id {
+                map.insert(m.id, id);
+            }
+        }
+        let mut copy = vec![];
+        let mut missing = 0;
+        for s in &item.clips {
+            let mut c = s.clip.clone();
+            if let Some(m) = c.media {
+                match map.get(&m) {
+                    Some(&n) => c.media = Some(n),
+                    None => {
+                        missing += 1;
+                        continue;
+                    }
+                }
+            }
+            copy.push((s.kind, s.kind_idx, c));
+        }
+        if copy.is_empty() {
+            self.notify("Its files were moved or deleted");
+            return;
+        }
+        let ids = self.paste_clips(copy, t);
+        if ids.len() > 1 && !self.project.clip(ids[0]).is_some_and(|c| c.group.is_some()) {
+            self.project.make_group(&ids);
+        }
+        self.notify(if missing == 0 { format!("Added {}", item.name) } else { format!("Added {} ({missing} clip(s) left out: their files are missing)", item.name) });
     }
 
     pub fn duplicate_selected(&mut self) {
@@ -1494,6 +1659,7 @@ impl App {
         let Some((ti, ci)) = self.project.find_clip(id) else { return };
         let mut c = self.project.tracks[ti].clips[ci].clone();
         c.id = self.project.new_id();
+        c.group = None;
         let kind = self.project.tracks[ti].kind;
         if kind == TrackKind::Main {
             c.transition = None;
@@ -2256,6 +2422,8 @@ impl App {
                     ("Wheel", "Scroll timeline"),
                     ("K", "Add / remove keyframe"),
                     ("T", "Add text at playhead"),
+                    ("Ctrl+G", "Group the picked clips"),
+                    ("Ctrl+Shift+G", "Ungroup"),
                 ] {
                     ui.label(egui::RichText::new(k).strong());
                     ui.label(v);
@@ -2296,9 +2464,17 @@ impl App {
                 c && i.key_pressed(Key::Minus),
                 (c && i.key_pressed(Key::C)) || i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
                 (c && i.key_pressed(Key::V)) || i.events.iter().any(|e| matches!(e, egui::Event::Paste(t) if t.starts_with(COPY_MARK))),
+                c && !i.modifiers.shift && i.key_pressed(Key::G),
+                c && i.modifiers.shift && i.key_pressed(Key::G),
             ]
         });
-        let [space, split, del, undo, redo, dup, left, right, shift, home, end, imp, save, exp, key, text, all, esc, zin, zout, copy, paste] = keys;
+        let [space, split, del, undo, redo, dup, left, right, shift, home, end, imp, save, exp, key, text, all, esc, zin, zout, copy, paste, grp, ungrp] = keys;
+        if grp {
+            self.group_picked();
+        }
+        if ungrp {
+            self.ungroup_picked();
+        }
         if copy {
             self.copy_selected(ctx);
         }
@@ -2524,7 +2700,7 @@ impl App {
             let released = ui.input(|i| i.pointer.any_released());
             let over = ui.input(|i| i.pointer.interact_pos()).map(|p| img_rect.contains(p)).unwrap_or(false);
             if released && over {
-                self.drop_on_player(item);
+                self.drop_on_player(ui.ctx(), item);
             }
         }
         ui.horizontal(|ui| {
@@ -2546,8 +2722,13 @@ impl App {
         });
     }
 
-    fn drop_on_player(&mut self, item: LibItem) {
+    fn drop_on_player(&mut self, ctx: &egui::Context, item: LibItem) {
         match item {
+            LibItem::Group(i) => {
+                if let Some(it) = self.mylib.get(i).cloned() {
+                    self.place_mine_group(ctx, &it, self.playhead);
+                }
+            }
             LibItem::Media(id) => self.add_media_at_playhead(id),
             LibItem::Text(i) => {
                 let t = self.playhead;
@@ -2736,6 +2917,7 @@ impl App {
             LibItem::Effect(e) => e.name().to_string(),
             LibItem::Filter(f) => f.name().to_string(),
             LibItem::Transition(t) => t.name().to_string(),
+            LibItem::Group(i) => self.mylib.get(*i).map(|it| it.name.clone()).unwrap_or_default(),
         };
         if let Some(p) = ctx.pointer_interact_pos() {
             let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("ghost")));

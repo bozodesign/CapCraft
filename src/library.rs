@@ -126,6 +126,7 @@ fn paint_transition_icon(ui: &egui::Ui, r: Rect, k: TransitionKind, p: f32) {
 
 impl App {
     pub fn library_ui(&mut self, ui: &mut egui::Ui) {
+        self.mine_rects.clear();
         // tab strip
         egui::Frame::new().fill(BG0).inner_margin(egui::Margin::symmetric(6, 6)).show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -145,6 +146,7 @@ impl App {
                     }
                     if tab == LibTab::Mine {
                         self.mine_drop_target(ui, r);
+                        self.mine_rects.push(r);
                     }
                 }
             });
@@ -164,6 +166,7 @@ impl App {
         });
         if self.tab == LibTab::Mine {
             let area = frame.response.rect;
+            self.mine_rects.push(area);
             self.mine_drop_target(ui, area);
             // files being dragged in from the computer land in My library while it's open
             if files_over {
@@ -256,34 +259,62 @@ impl App {
         }
         painter.text(Pos2::new(rect.min.x + 6.0, rect.max.y - 11.0), Align2::LEFT_CENTER, crate::thai::ui(&name), FontId::proportional(11.0), TEXT);
         let plus = plus_badge(ui, img, resp.hovered());
+        // remove from the project: a bin at the top left while the pointer is on the card
+        let uses = self.project.media_uses(m.id);
+        let bin = Rect::from_min_size(img.left_top() + Vec2::new(3.0, 3.0), Vec2::splat(20.0));
+        let at = |ui: &egui::Ui, r: Rect| ui.input(|i| i.pointer.interact_pos()).map(|p| r.contains(p)).unwrap_or(false);
+        if resp.hovered() {
+            let on = at(ui, bin);
+            painter.rect_filled(bin, 4.0, if on { Color32::from_rgb(200, 60, 60) } else { Color32::from_black_alpha(170) });
+            painter.text(bin.center(), Align2::CENTER_CENTER, "🗑", FontId::proportional(11.0), Color32::WHITE);
+        }
+        // a small mark on media the timeline uses
+        if uses > 0 {
+            let g = painter.layout_no_wrap(format!("✔ {uses}"), FontId::proportional(9.5), Color32::WHITE);
+            let br = Rect::from_min_size(img.left_bottom() + Vec2::new(3.0, -g.size().y - 5.0), g.size() + Vec2::new(6.0, 2.0));
+            painter.rect_filled(br, 3.0, ACCENT.gamma_multiply(0.85));
+            painter.galley(br.min + Vec2::new(3.0, 1.0), g, Color32::WHITE);
+        }
+        let mut remove = false;
         if resp.clicked() {
-            self.lib_selected = Some(m.id);
-            if resp.hovered() && ui.input(|i| i.pointer.interact_pos()).map(|p| plus.contains(p)).unwrap_or(false) {
-                self.add_media_at_playhead(m.id);
+            if resp.hovered() && at(ui, bin) {
+                remove = true;
+            } else {
+                self.lib_selected = Some(m.id);
+                if resp.hovered() && at(ui, plus) {
+                    self.add_media_at_playhead(m.id);
+                }
             }
         }
-        if resp.double_clicked() {
+        if resp.double_clicked() && !remove {
             self.add_media_at_playhead(m.id);
         }
         if resp.drag_started() {
             self.lib_drag = Some(LibItem::Media(m.id));
         }
-        if m.kind != MediaKind::Color && !m.path.is_empty() {
-            resp.context_menu(|ui| {
-                if ui.button("⭐").on_hover_text("Add to My library: keep it for every project (intros, outros, music…)").clicked() {
-                    ui.close_menu();
-                    self.add_to_mine(&m.path);
-                }
-            });
+        let remove_tip = if uses == 0 { "Remove from this project (the file stays on your computer)".to_string() } else { format!("Remove from this project, with the {uses} clip(s) using it on the timeline (the file stays on your computer; Ctrl+Z brings it back)") };
+        resp.context_menu(|ui| {
+            if m.kind != MediaKind::Color && !m.path.is_empty() && ui.button("⭐").on_hover_text("Add to My library: keep it for every project (intros, outros, music…)").clicked() {
+                ui.close_menu();
+                self.add_to_mine(&m.path);
+            }
+            if ui.button("🗑").on_hover_text(&remove_tip).clicked() {
+                ui.close_menu();
+                remove = true;
+            }
+        });
+        let used = if uses == 0 { "Not used on the timeline.".to_string() } else { format!("Used by {uses} clip(s) on the timeline.") };
+        resp.on_hover_text(format!("{used}\nDrag to the timeline, or click + to add at the playhead. The bin at the top left takes it out of the project. Right-click to keep it in My library."));
+        if remove {
+            self.remove_media_from_project(m.id);
         }
-        resp.on_hover_text("Drag to the timeline, or click + to add at the playhead. Right-click to keep it in My library.");
     }
 
     fn mine_tab(&mut self, ui: &mut egui::Ui) {
         use crate::mylib::Cat;
         let ctx = ui.ctx().clone();
         let mut add = false;
-        header(ui, "My library", "Your own intros, outros and music. They're here in every project, so you don't have to look for the files each time.", |ui| {
+        header(ui, "My library", "Your own intros, outros, music and clips kept from a timeline. They're here in every project, so you don't have to look for them each time.", |ui| {
             add = panel_button(ui, true, "+  Add", "Add files to My library").clicked();
         });
         if add {
@@ -312,11 +343,11 @@ impl App {
             ui.add_space(20.0);
             ui.vertical_centered(|ui| {
                 ui.label(egui::RichText::new("⭐").size(28.0).color(MUTED));
-                ui.label(egui::RichText::new("Nothing here yet.\nDrop your intro, outro and music files here,\nuse Add, or drag a file from Media onto Mine.").color(MUTED));
+                ui.label(egui::RichText::new("Nothing here yet.\nDrop your intro, outro and music files here,\nuse Add, drag a file from Media onto Mine,\nor drag clips from the timeline onto Mine.").color(MUTED));
             });
             return;
         }
-        for p in self.mylib.iter().map(|i| i.path.clone()).collect::<Vec<_>>() {
+        for p in self.mylib.iter().filter_map(|i| i.picture_path().map(str::to_string)).collect::<Vec<_>>() {
             self.request_file_thumb(&ctx, &p);
         }
         let thumbs = &self.mine_thumbs;
@@ -337,12 +368,14 @@ impl App {
                 for &i in row {
                     let it = &mut self.mylib[i];
                     let ok = it.exists();
-                    let kind = media_kind_icon(&it.path);
+                    let group = it.is_group();
+                    let pic = it.picture_path().unwrap_or("").to_string();
+                    let kind = if group { 3 } else { media_kind_icon(&it.path) };
                     let (resp, rect) = card(ui, w, w * 0.68, false);
                     let img = Rect::from_min_max(rect.min + Vec2::new(4.0, 4.0), rect.max - Vec2::new(4.0, 22.0));
                     let painter = ui.painter_at(rect);
                     let tint = if ok { Color32::WHITE } else { Color32::from_gray(90) };
-                    match thumbs.get(&it.path).and_then(|t| t.as_ref()) {
+                    match thumbs.get(&pic).and_then(|t| t.as_ref()) {
                         Some(t) => {
                             painter.rect_filled(img, 4.0, BG0);
                             painter.image(t.id(), img, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), tint);
@@ -352,6 +385,7 @@ impl App {
                             let icon = match kind {
                                 0 => "🎵",
                                 1 => "🖼",
+                                3 => "🔗",
                                 _ => "🎬",
                             };
                             if ok {
@@ -359,8 +393,9 @@ impl App {
                             }
                         }
                     }
-                    // what it's for, top left
-                    let g = painter.layout_no_wrap(it.cat.name().to_string(), FontId::proportional(9.5), Color32::WHITE);
+                    // what it's for, top left (kept clips: how many, and how long)
+                    let tag_text = if group { format!("🔗 {} · {}", it.clips.len(), short_time(it.length())) } else { it.cat.name().to_string() };
+                    let g = painter.layout_no_wrap(tag_text, FontId::proportional(9.5), Color32::WHITE);
                     let tag = Rect::from_min_size(img.left_top() + Vec2::new(3.0, 3.0), g.size() + Vec2::new(6.0, 2.0));
                     painter.rect_filled(tag, 3.0, ACCENT);
                     painter.galley(tag.min + Vec2::new(3.0, 1.0), g, Color32::WHITE);
@@ -408,19 +443,22 @@ impl App {
                     if resp.drag_started() && ok {
                         drag_it = Some(i);
                     }
+                    let use_hint = if group { "Put the clips in at the playhead, grouped" } else { it.cat.use_hint() };
                     resp.context_menu(|ui| {
-                        if ui.add_enabled(ok, egui::Button::new("Use")).on_hover_text(it.cat.use_hint()).clicked() {
+                        if ui.add_enabled(ok, egui::Button::new("Use")).on_hover_text(use_hint).clicked() {
                             ui.close_menu();
                             use_it = Some(i);
                         }
-                        ui.menu_button("Kind", |ui| {
-                            for c in Cat::ALL {
-                                if ui.selectable_value(&mut it.cat, c, c.name()).changed() {
-                                    changed = true;
-                                    ui.close_menu();
+                        if !group {
+                            ui.menu_button("Kind", |ui| {
+                                for c in Cat::ALL {
+                                    if ui.selectable_value(&mut it.cat, c, c.name()).changed() {
+                                        changed = true;
+                                        ui.close_menu();
+                                    }
                                 }
-                            }
-                        });
+                            });
+                        }
                         if ui.button("✏").on_hover_text("Rename: the name shown here and in your projects (the file on your computer keeps its name)").clicked() {
                             ui.close_menu();
                             rename_start = Some(i);
@@ -430,7 +468,11 @@ impl App {
                             remove = Some(i);
                         }
                     });
-                    let tip = if ok {
+                    let tip = if group && ok {
+                        format!("{} clips kept from a timeline, with their edits\nDrag them to the timeline, or click + or double-click to put them in at the playhead. Right-click to rename or remove.", it.clips.len())
+                    } else if group {
+                        "Some of the files these clips use were moved or deleted. Right-click to remove it.".to_string()
+                    } else if ok {
                         format!("{}\nDrag it to the timeline, or click + or double-click to use it ({}). Right-click to rename it, change its kind or remove it.", it.path, it.cat.use_hint().to_lowercase())
                     } else {
                         format!("{}\nFile not found: it was moved or deleted. Right-click to remove it.", it.path)
@@ -463,9 +505,13 @@ impl App {
         }
         // dragged out: brought into the project now, then dropped like a Media file
         if let Some(i) = drag_it {
-            let path = self.mylib[i].path.clone();
-            if let Some(id) = self.media_for_path(&ctx, &path) {
-                self.lib_drag = Some(LibItem::Media(id));
+            if self.mylib[i].is_group() {
+                self.lib_drag = Some(LibItem::Group(i));
+            } else {
+                let path = self.mylib[i].path.clone();
+                if let Some(id) = self.media_for_path(&ctx, &path) {
+                    self.lib_drag = Some(LibItem::Media(id));
+                }
             }
         }
     }
@@ -474,11 +520,19 @@ impl App {
         let ctx = ui.ctx().clone();
         let items: Vec<Media> = self.project.media.iter().filter(|m| m.kind != MediaKind::Color).cloned().collect();
         let mut import = false;
+        let mut clear = false;
+        let unused = self.project.unused_media().iter().filter(|&&id| self.project.media(id).is_some_and(|m| m.kind != MediaKind::Color)).count();
         header(ui, &format!("Your media ({})", items.len()), "Videos, pictures and sound. You can also drop files onto the window.", |ui| {
             import = panel_button(ui, true, "⬇  Import", "Import videos, pictures and sound (Ctrl+I)").clicked();
+            if unused > 0 {
+                clear = icon_button(ui, "🗑", &format!("Clear unused media: take the {unused} file(s) no clip on the timeline uses out of this project (the files stay on your computer)")).clicked();
+            }
         });
         if import {
             self.pick_and_import(&ctx, false);
+        }
+        if clear {
+            self.clear_unused_media();
         }
         let (cols, w) = grid_cols(ui, 104.0);
         for row in items.chunks(cols) {
